@@ -101,8 +101,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk 
 USER ysyx
 WORKDIR /workspace
 
-RUN git config --global --add safe.directory '*' && \
-    git config --global user.name "ysyx" && \
-    git config --global user.email "ysyx@oscc.cc"
+ENV YSYX_HOME=/workspace
+ENV NEMU_HOME=/workspace/nemu
+ENV AM_HOME=/workspace/abstract-machine
+ENV NPC_HOME=/workspace/npc
+ENV NVBOARD_HOME=/workspace/nvboard
+ENV NAVY_HOME=/workspace/navy-apps
 
 CMD ["/bin/bash"]
