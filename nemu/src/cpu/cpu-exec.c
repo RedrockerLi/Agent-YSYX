@@ -31,8 +31,35 @@ static uint64_t g_timer = 0; // unit: us
 static bool g_print_step = false;
 
 void device_update();
+bool check_wp();
+
+#define IRINGBUF_SIZE 16
+static char iringbuf[IRINGBUF_SIZE][128];
+static int iringbuf_p = 0;
+static bool iringbuf_full = false;
+
+static void iringbuf_write(const char *logbuf) {
+  snprintf(iringbuf[iringbuf_p], sizeof(iringbuf[0]), "%s", logbuf);
+  iringbuf_p = (iringbuf_p + 1) % IRINGBUF_SIZE;
+  if (iringbuf_p == 0) iringbuf_full = true;
+}
+
+void iringbuf_display() {
+  printf("------- Most Recent Instructions (iringbuf) -------\n");
+  int count = iringbuf_full ? IRINGBUF_SIZE : iringbuf_p;
+  int start = iringbuf_full ? iringbuf_p : 0;
+  for (int i = 0; i < count; i++) {
+    int idx = (start + i) % IRINGBUF_SIZE;
+    bool is_last = (i == count - 1);
+    printf("%s %s\n", is_last ? "-->" : "   ", iringbuf[idx]);
+  }
+  printf("---------------------------------------------------\n");
+}
 
 static void trace_and_difftest(Decode *_this, vaddr_t dnpc) {
+#ifdef CONFIG_ITRACE
+  iringbuf_write(_this->logbuf);
+#endif
 #ifdef CONFIG_ITRACE_COND
   if (ITRACE_COND) { log_write("%s\n", _this->logbuf); }
 #endif
@@ -77,6 +104,9 @@ static void execute(uint64_t n) {
     exec_once(&s, cpu.pc);
     g_nr_guest_inst ++;
     trace_and_difftest(&s, cpu.pc);
+    if (check_wp()) {
+      nemu_state.state = NEMU_STOP;
+    }
     if (nemu_state.state != NEMU_RUNNING) break;
     IFDEF(CONFIG_DEVICE, device_update());
   }
@@ -93,6 +123,7 @@ static void statistic() {
 
 void assert_fail_msg() {
   isa_reg_display();
+  iringbuf_display();
   statistic();
 }
 

@@ -15,6 +15,7 @@
 
 #include <isa.h>
 #include <cpu/cpu.h>
+#include <memory/vaddr.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "sdb.h"
@@ -47,9 +48,138 @@ static int cmd_c(char *args) {
   return 0;
 }
 
-
 static int cmd_q(char *args) {
+  nemu_state.state = NEMU_QUIT;
   return -1;
+}
+
+static int cmd_si(char *args) {
+  uint64_t n = 1;
+  if (args != NULL) {
+    while (*args == ' ') args++;
+    if (*args != '\0') {
+      char *endptr;
+      n = strtoull(args, &endptr, 10);
+      if (n == 0) n = 1;
+    }
+  }
+  cpu_exec(n);
+  return 0;
+}
+
+static int cmd_info(char *args) {
+  if (args == NULL) {
+    printf("Usage: info r (display registers) | info w (display watchpoints)\n");
+    return 0;
+  }
+  while (*args == ' ') args++;
+  if (strcmp(args, "r") == 0) {
+    isa_reg_display();
+  } else if (strcmp(args, "w") == 0) {
+    print_wp();
+  } else {
+    printf("Unknown info subcommand '%s'. Use 'info r' or 'info w'.\n", args);
+  }
+  return 0;
+}
+
+static int cmd_x(char *args) {
+  if (args == NULL) {
+    printf("Usage: x N EXPR\n");
+    return 0;
+  }
+  while (*args == ' ') args++;
+  char *n_str = strtok(args, " ");
+  if (n_str == NULL) {
+    printf("Usage: x N EXPR\n");
+    return 0;
+  }
+  char *expr_str = strtok(NULL, "");
+  if (expr_str == NULL) {
+    printf("Usage: x N EXPR\n");
+    return 0;
+  }
+  while (*expr_str == ' ') expr_str++;
+
+  int n = atoi(n_str);
+  if (n <= 0) {
+    printf("Invalid length '%s'\n", n_str);
+    return 0;
+  }
+
+  bool success = false;
+  word_t addr = expr(expr_str, &success);
+  if (!success) {
+    printf("Failed to evaluate address expression '%s'\n", expr_str);
+    return 0;
+  }
+
+  for (int i = 0; i < n; i++) {
+    word_t curr_addr = addr + i * 4;
+    word_t val = vaddr_read(curr_addr, 4);
+    printf("0x%08x:  0x%08x  (%u)\n", curr_addr, val, val);
+  }
+  return 0;
+}
+
+static int cmd_p(char *args) {
+  if (args == NULL) {
+    printf("Usage: p EXPR\n");
+    return 0;
+  }
+  while (*args == ' ') args++;
+  if (*args == '\0') {
+    printf("Usage: p EXPR\n");
+    return 0;
+  }
+
+  bool success = false;
+  word_t val = expr(args, &success);
+  if (success) {
+    printf("0x%x (%u)\n", val, val);
+  } else {
+    printf("Failed to evaluate expression: %s\n", args);
+  }
+  return 0;
+}
+
+static int cmd_w(char *args) {
+  if (args == NULL) {
+    printf("Usage: w EXPR\n");
+    return 0;
+  }
+  while (*args == ' ') args++;
+  if (*args == '\0') {
+    printf("Usage: w EXPR\n");
+    return 0;
+  }
+
+  bool success = false;
+  WP *wp = new_wp(args, &success);
+  if (success && wp != NULL) {
+    printf("Watchpoint %d created: %s = 0x%x (%u)\n", wp->NO, args, wp->old_val, wp->old_val);
+  }
+  return 0;
+}
+
+static int cmd_d(char *args) {
+  if (args == NULL) {
+    printf("Usage: d N\n");
+    return 0;
+  }
+  while (*args == ' ') args++;
+  if (*args == '\0') {
+    printf("Usage: d N\n");
+    return 0;
+  }
+
+  int no = atoi(args);
+  if (free_wp(no)) {
+    printf("Watchpoint %d deleted.\n", no);
+  } else {
+    printf("Watchpoint %d not found.\n", no);
+  }
+  return 0;
 }
 
 static int cmd_help(char *args);
@@ -62,9 +192,12 @@ static struct {
   { "help", "Display information about all supported commands", cmd_help },
   { "c", "Continue the execution of the program", cmd_c },
   { "q", "Exit NEMU", cmd_q },
-
-  /* TODO: Add more commands */
-
+  { "si", "Step execution: si [N]", cmd_si },
+  { "info", "Display program status: info r (registers), info w (watchpoints)", cmd_info },
+  { "x", "Examine memory: x N EXPR", cmd_x },
+  { "p", "Print expression result: p EXPR", cmd_p },
+  { "w", "Set watchpoint: w EXPR", cmd_w },
+  { "d", "Delete watchpoint: d N", cmd_d },
 };
 
 #define NR_CMD ARRLEN(cmd_table)
@@ -77,13 +210,13 @@ static int cmd_help(char *args) {
   if (arg == NULL) {
     /* no argument given */
     for (i = 0; i < NR_CMD; i ++) {
-      printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description);
+      printf("%-6s - %s\n", cmd_table[i].name, cmd_table[i].description);
     }
   }
   else {
     for (i = 0; i < NR_CMD; i ++) {
       if (strcmp(arg, cmd_table[i].name) == 0) {
-        printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description);
+        printf("%-6s - %s\n", cmd_table[i].name, cmd_table[i].description);
         return 0;
       }
     }

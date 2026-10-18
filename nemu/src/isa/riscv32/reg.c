@@ -24,8 +24,33 @@ const char *regs[] = {
 };
 
 void isa_reg_display() {
+  int n = MUXDEF(CONFIG_RVE, 16, 32);
+  for (int i = 0; i < n; i++) {
+    printf("%-4s: 0x%08x  %-10u%s", regs[i], cpu.gpr[i], cpu.gpr[i], ((i + 1) % 4 == 0) ? "\n" : "    ");
+  }
+  if (n % 4 != 0) printf("\n");
+  printf("%-4s: 0x%08x  %-10u\n", "pc", cpu.pc, cpu.pc);
 }
 
 word_t isa_reg_str2val(const char *s, bool *success) {
+  *success = true;
+  if (s == NULL || *s == '\0') {
+    *success = false;
+    return 0;
+  }
+  if (*s == '$') s++;
+  if (strcmp(s, "pc") == 0) {
+    return cpu.pc;
+  }
+  int n = MUXDEF(CONFIG_RVE, 16, 32);
+  for (int i = 0; i < n; i++) {
+    const char *rname = regs[i];
+    if (rname[0] == '$') rname++;
+    if (strcmp(s, rname) == 0) {
+      return cpu.gpr[i];
+    }
+  }
+  *success = false;
   return 0;
 }
+
