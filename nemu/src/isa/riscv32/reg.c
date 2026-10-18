@@ -29,7 +29,8 @@ void isa_reg_display() {
     printf("%-4s: 0x%08x  %-10u%s", regs[i], cpu.gpr[i], cpu.gpr[i], ((i + 1) % 4 == 0) ? "\n" : "    ");
   }
   if (n % 4 != 0) printf("\n");
-  printf("%-4s: 0x%08x  %-10u\n", "pc", cpu.pc, cpu.pc);
+  printf("%-4s: 0x%08x  %-10u    %-7s: 0x%08x\n", "pc", cpu.pc, cpu.pc, "mstatus", cpu.mstatus);
+  printf("%-7s: 0x%08x  %-7s: 0x%08x  %-7s: 0x%08x\n", "mtvec", cpu.mtvec, "mepc", cpu.mepc, "mcause", cpu.mcause);
 }
 
 word_t isa_reg_str2val(const char *s, bool *success) {
@@ -39,9 +40,12 @@ word_t isa_reg_str2val(const char *s, bool *success) {
     return 0;
   }
   if (*s == '$') s++;
-  if (strcmp(s, "pc") == 0) {
-    return cpu.pc;
-  }
+  if (strcmp(s, "pc") == 0) return cpu.pc;
+  if (strcmp(s, "mstatus") == 0) return cpu.mstatus;
+  if (strcmp(s, "mtvec") == 0) return cpu.mtvec;
+  if (strcmp(s, "mepc") == 0) return cpu.mepc;
+  if (strcmp(s, "mcause") == 0) return cpu.mcause;
+
   int n = MUXDEF(CONFIG_RVE, 16, 32);
   for (int i = 0; i < n; i++) {
     const char *rname = regs[i];

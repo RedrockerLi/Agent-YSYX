@@ -48,8 +48,9 @@
 #  include <sys/stdint.h>
 #  include <sys/types.h>
 #else
-/* Include the standard compiler builtin headers we use functionality from. */
-#  include <limits.h>
+#ifndef CHAR_BIT
+#define CHAR_BIT __CHAR_BIT__
+#endif
 #  include <stdint.h>
 #  include <stdbool.h>
 #  include <float.h>

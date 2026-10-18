@@ -60,7 +60,7 @@ ifneq ($(MAKECMDGOALS),archive)
 ifdef diskfilelist
 RAMDISK_SRC = $(WORK_DIR)/build/$(NAME).ramdisk.c
 $(RAMDISK_SRC): $(diskfilelist)
-	python $(AM_HOME)/tools/gen-ramdisk.py $@ $^
+	$(PYTHON) $(AM_HOME)/tools/gen-ramdisk.py $@ $^
 
 SRCS += $(RAMDISK_SRC)
 endif
@@ -74,6 +74,7 @@ LINKAGE  += $(OBJS)  # library archives are added by LIB_TEMPLATE below
 ## 3. General Compilation Flags
 
 ### (Cross) compilers, e.g., mips-linux-gnu-g++
+PYTHON   ?= python3
 AS        = $(CROSS_COMPILE)gcc
 CC        = $(CROSS_COMPILE)gcc
 CXX       = $(CROSS_COMPILE)g++
@@ -93,7 +94,7 @@ CFLAGS   += -O2 -MMD -Wall -Werror $(INCFLAGS) \
             -D__ARCH__=$(ARCH) -D__ARCH_$(shell echo $(ARCH) | tr a-z A-Z | tr - _) \
             -D__PLATFORM__=$(PLATFORM) -D__PLATFORM_$(shell echo $(PLATFORM) | tr a-z A-Z | tr - _) \
             -DARCH_H=\"$(ARCH_H)\" \
-            -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector \
+            -ffreestanding -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector \
             -Wno-main -U_FORTIFY_SOURCE -fvisibility=hidden
 CXXFLAGS +=  $(CFLAGS) -ffreestanding -fno-rtti -fno-exceptions
 ASFLAGS  += -MMD $(INCFLAGS)

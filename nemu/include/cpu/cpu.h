@@ -18,6 +18,7 @@
 
 #include <common.h>
 
+extern uint64_t g_nr_guest_inst;
 void cpu_exec(uint64_t n);
 
 void set_nemu_state(int state, vaddr_t pc, int halt_ret);
