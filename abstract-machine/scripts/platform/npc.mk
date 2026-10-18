@@ -25,7 +25,11 @@ image: image-dep
 	@echo + OBJCOPY "->" $(IMAGE_REL).bin
 	@$(OBJCOPY) -S --set-section-flags .bss=alloc,contents -O binary $(IMAGE).elf $(IMAGE).bin
 
-run: insert-arg
-	echo "TODO: add command here to run simulation"
+NPC_EXEC := $(NPC_HOME)/build/ysyx_261018
+DIFF_REF_SO ?= $(NEMU_HOME)/build/riscv32-nemu-interpreter-so
 
-.PHONY: insert-arg
+run: insert-arg
+	$(MAKE) -C $(NPC_HOME) sim
+	$(NPC_EXEC) -b -d $(DIFF_REF_SO) $(IMAGE).bin
+
+.PHONY: insert-arg run
