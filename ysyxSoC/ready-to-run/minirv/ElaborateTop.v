@@ -3580,7 +3580,7 @@ module ElaborateTop(
   SimTop dut (
     .clock                     (clock),
     .reset                     (reset),
-    .cpuClock                  (1'h0),
+    .cpuClock                  (clock),
     .coreSel                   (1'h0),
     .externalPins_mygpio_out   (/* unused */),
     .externalPins_mygpio_in    (16'h0),

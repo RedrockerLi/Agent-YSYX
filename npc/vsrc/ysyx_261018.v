@@ -1,11 +1,88 @@
 `timescale 1ns / 1ps
 
-module ysyx_261018 (
+module ysyx_261018 #(
+  parameter RESET_VAL = 32'h80000000,
+  parameter BUS_MODE  = 0
+) (
   input         clock,
   input         reset,
   input         io_interrupt,
-  input  [31:0] io_master_awready,
-  input  [31:0] io_slave_awvalid
+
+  // AXI4 Master Interface
+  input         io_master_awready,
+  output        io_master_awvalid,
+  output [31:0] io_master_awaddr,
+  output [3:0]  io_master_awid,
+  output [7:0]  io_master_awlen,
+  output [2:0]  io_master_awsize,
+  output [1:0]  io_master_awburst,
+  input         io_master_wready,
+  output        io_master_wvalid,
+  output [31:0] io_master_wdata,
+  output [3:0]  io_master_wstrb,
+  output        io_master_wlast,
+  output        io_master_bready,
+  input         io_master_bvalid,
+  input  [1:0]  io_master_bresp,
+  input  [3:0]  io_master_bid,
+  input         io_master_arready,
+  output        io_master_arvalid,
+  output [31:0] io_master_araddr,
+  output [3:0]  io_master_arid,
+  output [7:0]  io_master_arlen,
+  output [2:0]  io_master_arsize,
+  output [1:0]  io_master_arburst,
+  output        io_master_rready,
+  input         io_master_rvalid,
+  input  [1:0]  io_master_rresp,
+  input  [31:0] io_master_rdata,
+  input         io_master_rlast,
+  input  [3:0]  io_master_rid,
+
+  // AXI4 Slave Interface
+  output        io_slave_awready,
+  input         io_slave_awvalid,
+  input  [31:0] io_slave_awaddr,
+  input  [3:0]  io_slave_awid,
+  input  [7:0]  io_slave_awlen,
+  input  [2:0]  io_slave_awsize,
+  input  [1:0]  io_slave_awburst,
+  output        io_slave_wready,
+  input         io_slave_wvalid,
+  input  [31:0] io_slave_wdata,
+  input  [3:0]  io_slave_wstrb,
+  input         io_slave_wlast,
+  input         io_slave_bready,
+  output        io_slave_bvalid,
+  output [1:0]  io_slave_bresp,
+  output [3:0]  io_slave_bid,
+  output        io_slave_arready,
+  input         io_slave_arvalid,
+  input  [31:0] io_slave_araddr,
+  input  [3:0]  io_slave_arid,
+  input  [7:0]  io_slave_arlen,
+  input  [2:0]  io_slave_arsize,
+  input  [1:0]  io_slave_arburst,
+  input         io_slave_rready,
+  output        io_slave_rvalid,
+  output [1:0]  io_slave_rresp,
+  output [31:0] io_slave_rdata,
+  output        io_slave_rlast,
+  output [3:0]  io_slave_rid,
+
+  // SimpleBus Interface (for mini-SoC / Stage E/D)
+  output [31:0] io_ifu_addr,
+  output        io_ifu_reqValid,
+  input  [31:0] io_ifu_rdata,
+  input         io_ifu_respValid,
+  output [31:0] io_lsu_addr,
+  output        io_lsu_reqValid,
+  input  [31:0] io_lsu_rdata,
+  input         io_lsu_respValid,
+  output [1:0]  io_lsu_size,
+  output        io_lsu_wen,
+  output [31:0] io_lsu_wdata,
+  output [3:0]  io_lsu_wmask
 );
 
   // DPI-C imports for simulation memory access and trap detection
@@ -14,6 +91,15 @@ module ysyx_261018 (
   import "DPI-C" context function void npc_ebreak(input int pc, input int a0);
 
   reg [31:0] pc;
+
+  // SimpleBus State Machine definitions (for BUS_MODE == 1)
+  localparam S_IF_WAIT  = 2'd0;
+  localparam S_MEM_WAIT = 2'd1;
+
+  reg [1:0]  state;
+  reg [31:0] inst_reg;
+  reg        io_ifu_reqValid_r;
+  reg        io_lsu_reqValid_r;
 
   // DPI-C exports for testbench inspection and DiffTest
   export "DPI-C" function get_pc;
@@ -27,7 +113,7 @@ module ysyx_261018 (
   endfunction
 
   // 1. Instruction Fetch
-  wire [31:0] inst = pmem_read(pc, 8'd4);
+  wire [31:0] inst = (BUS_MODE == 1) ? ((state == S_IF_WAIT) ? io_ifu_rdata : inst_reg) : pmem_read(pc, 8'd4);
 
   // 2. Decode fields
   wire [6:0]  opcode = inst[6:0];
@@ -68,7 +154,10 @@ module ysyx_261018 (
   wire [31:0] rs1_data;
   wire [31:0] rs2_data;
   reg  [31:0] rf_wdata;
-  wire        rf_wen = (is_alu_r || is_alu_i || is_load || is_lui || is_auipc || is_jal || is_jalr || is_csr);
+  wire        rf_wen_normal = (is_alu_r || is_alu_i || is_load || is_lui || is_auipc || is_jal || is_jalr || is_csr);
+  wire        rf_wen = (BUS_MODE == 0) ? rf_wen_normal :
+                       (state == S_IF_WAIT)  ? (io_ifu_respValid && !is_load && !is_store && rf_wen_normal) :
+                       (state == S_MEM_WAIT) ? (io_lsu_respValid && is_load) : 1'b0;
 
   ysyx_261018_regfile #(
     .NUM_REGS(32)
@@ -103,7 +192,9 @@ module ysyx_261018 (
   wire [31:0] mtvec_out;
   wire [31:0] mepc_out;
   wire [31:0] csr_wdata_in = (funct3[2] == 1'b1) ? zimm : rs1_data;
-  wire        csr_wen = is_csr && (funct3[1:0] == 2'b01 || rs1 != 5'b0);
+  wire        csr_wen_normal = is_csr && (funct3[1:0] == 2'b01 || rs1 != 5'b0);
+  wire        csr_wen = (BUS_MODE == 0) ? csr_wen_normal :
+                        (state == S_IF_WAIT && io_ifu_respValid) ? csr_wen_normal : 1'b0;
 
   ysyx_261018_csr u_csr (
     .clk       (clock),
@@ -201,7 +292,8 @@ module ysyx_261018 (
 
   // 8. Memory Access (Load & Store)
   wire [1:0]  byte_offset = alu_res[1:0];
-  wire [31:0] mem_rdata_raw = is_load ? pmem_read(alu_res & ~32'h3, 8'd4) : 32'b0;
+  wire [31:0] mem_rdata_raw = (BUS_MODE == 1) ? io_lsu_rdata :
+                              (is_load ? pmem_read(alu_res & ~32'h3, 8'd4) : 32'b0);
   reg  [31:0] mem_rdata;
 
   always @(*) begin
@@ -280,8 +372,12 @@ module ysyx_261018 (
   // 10. Sequential State Updates
   always @(posedge clock) begin
     if (reset) begin
-      pc <= 32'h80000000;
-    end else begin
+      pc <= RESET_VAL;
+      state <= S_IF_WAIT;
+      io_ifu_reqValid_r <= 1'b1;
+      io_lsu_reqValid_r <= 1'b0;
+      inst_reg <= 32'b0;
+    end else if (BUS_MODE == 0) begin
       if (is_store) begin
         pmem_write(alu_res & ~32'h3, mem_wdata, {4'b0, mem_wmask});
       end
@@ -289,7 +385,115 @@ module ysyx_261018 (
         npc_ebreak(pc, u_regfile.get_gpr_val(5'd10));
       end
       pc <= dnpc;
+    end else begin
+      case (state)
+        S_IF_WAIT: begin
+          if (io_ifu_respValid) begin
+            if (is_load || is_store) begin
+              inst_reg <= io_ifu_rdata;
+              state <= S_MEM_WAIT;
+              io_ifu_reqValid_r <= 1'b0;
+              io_lsu_reqValid_r <= 1'b1;
+            end else begin
+              if (is_ebreak) begin
+                npc_ebreak(pc, u_regfile.get_gpr_val(5'd10));
+              end
+              pc <= dnpc;
+              io_ifu_reqValid_r <= 1'b1;
+            end
+          end
+        end
+        S_MEM_WAIT: begin
+          if (io_lsu_respValid) begin
+            pc <= dnpc;
+            state <= S_IF_WAIT;
+            io_lsu_reqValid_r <= 1'b0;
+            io_ifu_reqValid_r <= 1'b1;
+          end
+        end
+      endcase
     end
   end
+
+  // 11. AXI4 Master Bridge instantiation
+  wire        axi_req_valid = (is_load || is_store);
+  wire        axi_req_write = is_store;
+  wire [31:0] axi_req_addr  = alu_res & ~32'h3;
+  wire [2:0]  axi_req_size  = (funct3[1:0] == 2'b00) ? 3'b000 :
+                              (funct3[1:0] == 2'b01) ? 3'b001 : 3'b010;
+  wire [7:0]  axi_req_len   = 8'd0;
+  wire [31:0] axi_req_wdata = mem_wdata;
+  wire [3:0]  axi_req_wstrb = mem_wmask;
+  wire        axi_resp_valid;
+  wire [31:0] axi_resp_rdata;
+  wire        axi_resp_rlast;
+
+  ysyx_261018_axi_master u_axi_master (
+    .clock             (clock),
+    .reset             (reset),
+    .req_valid         (axi_req_valid),
+    .req_write         (axi_req_write),
+    .req_addr          (axi_req_addr),
+    .req_size          (axi_req_size),
+    .req_len           (axi_req_len),
+    .req_wdata         (axi_req_wdata),
+    .req_wstrb         (axi_req_wstrb),
+    .resp_valid        (axi_resp_valid),
+    .resp_rdata        (axi_resp_rdata),
+    .resp_rlast        (axi_resp_rlast),
+
+    .io_master_awready (io_master_awready),
+    .io_master_awvalid (io_master_awvalid),
+    .io_master_awaddr  (io_master_awaddr),
+    .io_master_awid    (io_master_awid),
+    .io_master_awlen   (io_master_awlen),
+    .io_master_awsize  (io_master_awsize),
+    .io_master_awburst (io_master_awburst),
+    .io_master_wready  (io_master_wready),
+    .io_master_wvalid  (io_master_wvalid),
+    .io_master_wdata   (io_master_wdata),
+    .io_master_wstrb   (io_master_wstrb),
+    .io_master_wlast   (io_master_wlast),
+    .io_master_bready  (io_master_bready),
+    .io_master_bvalid  (io_master_bvalid),
+    .io_master_bresp   (io_master_bresp),
+    .io_master_bid     (io_master_bid),
+    .io_master_arready (io_master_arready),
+    .io_master_arvalid (io_master_arvalid),
+    .io_master_araddr  (io_master_araddr),
+    .io_master_arid    (io_master_arid),
+    .io_master_arlen   (io_master_arlen),
+    .io_master_arsize  (io_master_arsize),
+    .io_master_arburst (io_master_arburst),
+    .io_master_rready  (io_master_rready),
+    .io_master_rvalid  (io_master_rvalid),
+    .io_master_rresp   (io_master_rresp),
+    .io_master_rdata   (io_master_rdata),
+    .io_master_rlast   (io_master_rlast),
+    .io_master_rid     (io_master_rid)
+  );
+
+  // 12. Tie off AXI Slave inputs/outputs
+  assign io_slave_awready = 1'b0;
+  assign io_slave_wready  = 1'b0;
+  assign io_slave_bvalid  = 1'b0;
+  assign io_slave_bresp   = 2'b00;
+  assign io_slave_bid     = 4'b0;
+  assign io_slave_arready = 1'b0;
+  assign io_slave_rvalid  = 1'b0;
+  assign io_slave_rresp   = 2'b00;
+  assign io_slave_rdata   = 32'b0;
+  assign io_slave_rlast   = 1'b0;
+  assign io_slave_rid     = 4'b0;
+
+  // 13. SimpleBus signal assignments
+  assign io_ifu_addr      = pc;
+  assign io_ifu_reqValid  = (BUS_MODE == 1) ? io_ifu_reqValid_r : 1'b0;
+  assign io_lsu_addr      = alu_res;
+  assign io_lsu_reqValid  = (BUS_MODE == 1) ? io_lsu_reqValid_r : 1'b0;
+  assign io_lsu_size      = funct3[1:0];
+  assign io_lsu_wen       = is_store;
+  assign io_lsu_wdata     = mem_wdata;
+  assign io_lsu_wmask     = mem_wmask;
 
 endmodule

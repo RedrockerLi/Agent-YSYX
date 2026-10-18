@@ -561,6 +561,13 @@ always @(posedge clk or posedge wb_rst_i)
         tf_push   <= #1 1'b0;
     end // else: !if(dlab)
 
+always @(posedge clk) begin
+    if (!wb_rst_i && wb_we_i && wb_addr_i==`UART_REG_TR && !dlab) begin
+        $write("%c", wb_dat_i[7:0]);
+        $fflush();
+    end
+end
+
 // Receiver FIFO trigger level selection logic (asynchronous mux)
 always @(fcr)
     case (fcr[`UART_FC_TL])
