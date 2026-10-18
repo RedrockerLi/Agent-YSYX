@@ -28,6 +28,11 @@ static uint32_t halt_pc = 0;
 // Exported from Verilog DPI-C
 extern "C" int get_pc();
 extern "C" int get_gpr(int idx);
+extern "C" int is_inst_commit();
+extern "C" int get_icache_hits();
+extern "C" int get_icache_misses();
+extern "C" int get_dcache_hits();
+extern "C" int get_dcache_misses();
 
 static inline void set_dpi_scope() {
   static svScope scope = NULL;
@@ -130,6 +135,22 @@ extern "C" void npc_ebreak(int pc, int a0) {
     printf("\033[1;31mnpc: HIT BAD TRAP at pc = 0x%08x (a0 = %d)\033[0m\n", halt_pc, halt_ret);
     npc_state = NPC_ABORT;
   }
+
+  set_dpi_scope();
+  uint32_t ic_hits   = (uint32_t)get_icache_hits();
+  uint32_t ic_misses = (uint32_t)get_icache_misses();
+  uint32_t dc_hits   = (uint32_t)get_dcache_hits();
+  uint32_t dc_misses = (uint32_t)get_dcache_misses();
+
+  printf("================ PERFORMANCE STATISTICS ================\n");
+  printf("Total Cycles       : %lu\n", g_cycle_cnt);
+  printf("Total Instructions : %lu\n", g_inst_cnt);
+  printf("IPC                : %.4f\n", g_cycle_cnt ? (double)g_inst_cnt / g_cycle_cnt : 0.0);
+  printf("ICache Hits        : %u, Misses: %u, Hit Rate: %.2f%%\n",
+         ic_hits, ic_misses, (ic_hits + ic_misses) ? (100.0 * ic_hits / (ic_hits + ic_misses)) : 0.0);
+  printf("DCache Hits        : %u, Misses: %u, Hit Rate: %.2f%%\n",
+         dc_hits, dc_misses, (dc_hits + dc_misses) ? (100.0 * dc_hits / (dc_hits + dc_misses)) : 0.0);
+  printf("========================================================\n");
 }
 
 static void dump_regs() {
@@ -203,10 +224,20 @@ static void single_cycle() {
 }
 
 static void step_inst() {
-  single_cycle();
-  g_inst_cnt++;
-  if (npc_state == NPC_RUNNING) {
-    check_difftest();
+  top->clock = 0;
+  top->eval();
+  set_dpi_scope();
+  bool commit = is_inst_commit();
+
+  top->clock = 1;
+  top->eval();
+  g_cycle_cnt++;
+
+  if (commit) {
+    g_inst_cnt++;
+    if (npc_state == NPC_RUNNING) {
+      check_difftest();
+    }
   }
 }
 

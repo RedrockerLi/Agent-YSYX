@@ -70,7 +70,7 @@ module ysyx_261018 #(
   output        io_slave_rlast,
   output [3:0]  io_slave_rid,
 
-  // SimpleBus Interface (for mini-SoC / Stage E/D)
+  // SimpleBus Interface (for backward compatibility if needed)
   output [31:0] io_ifu_addr,
   output        io_ifu_reqValid,
   input  [31:0] io_ifu_rdata,
@@ -92,14 +92,28 @@ module ysyx_261018 #(
 
   reg [31:0] pc;
 
-  // SimpleBus State Machine definitions (for BUS_MODE == 1)
-  localparam S_IF_WAIT  = 2'd0;
-  localparam S_MEM_WAIT = 2'd1;
+  // Cache Wires
+  wire        icache_resp_valid;
+  wire [31:0] icache_resp_rdata;
+  wire        dcache_resp_valid;
+  wire [31:0] dcache_resp_rdata;
+  wire        dcache_fence_done;
 
-  reg [1:0]  state;
-  reg [31:0] inst_reg;
-  reg        io_ifu_reqValid_r;
-  reg        io_lsu_reqValid_r;
+  wire [31:0] icache_hit_cnt;
+  wire [31:0] icache_miss_cnt;
+  wire [31:0] dcache_hit_cnt;
+  wire [31:0] dcache_miss_cnt;
+
+  // Stall & Commit logic
+  wire is_fence_i;
+  wire is_load;
+  wire is_store;
+
+  wire wait_icache = !icache_resp_valid;
+  wire wait_dcache = (is_load || is_store) && !dcache_resp_valid;
+  wire wait_fence  = is_fence_i && !dcache_fence_done;
+  wire cpu_stall   = wait_icache || wait_dcache || wait_fence;
+  wire inst_commit = !reset && !cpu_stall;
 
   // DPI-C exports for testbench inspection and DiffTest
   export "DPI-C" function get_pc;
@@ -112,8 +126,33 @@ module ysyx_261018 #(
     get_gpr = u_regfile.get_gpr_val(idx[4:0]);
   endfunction
 
-  // 1. Instruction Fetch
-  wire [31:0] inst = (BUS_MODE == 1) ? ((state == S_IF_WAIT) ? io_ifu_rdata : inst_reg) : pmem_read(pc, 8'd4);
+  export "DPI-C" function is_inst_commit;
+  function int is_inst_commit();
+    is_inst_commit = inst_commit ? 1 : 0;
+  endfunction
+
+  export "DPI-C" function get_icache_hits;
+  function int get_icache_hits();
+    get_icache_hits = icache_hit_cnt;
+  endfunction
+
+  export "DPI-C" function get_icache_misses;
+  function int get_icache_misses();
+    get_icache_misses = icache_miss_cnt;
+  endfunction
+
+  export "DPI-C" function get_dcache_hits;
+  function int get_dcache_hits();
+    get_dcache_hits = dcache_hit_cnt;
+  endfunction
+
+  export "DPI-C" function get_dcache_misses;
+  function int get_dcache_misses();
+    get_dcache_misses = dcache_miss_cnt;
+  endfunction
+
+  // 1. Instruction Fetch via ICache
+  wire [31:0] inst = icache_resp_rdata;
 
   // 2. Decode fields
   wire [6:0]  opcode = inst[6:0];
@@ -137,12 +176,12 @@ module ysyx_261018 #(
   wire is_jal    = (opcode == 7'b1101111);
   wire is_jalr   = (opcode == 7'b1100111 && funct3 == 3'b000);
   wire is_branch = (opcode == 7'b1100011);
-  wire is_load   = (opcode == 7'b0000011);
-  wire is_store  = (opcode == 7'b0100011);
+  assign is_load   = (opcode == 7'b0000011);
+  assign is_store  = (opcode == 7'b0100011);
   wire is_alu_i  = (opcode == 7'b0010011);
   wire is_alu_r  = (opcode == 7'b0110011);
   wire is_system = (opcode == 7'b1110011);
-  wire is_fence  = (opcode == 7'b0001111);
+  assign is_fence_i = (opcode == 7'b0001111);
 
   // System sub-instructions
   wire is_ebreak = is_system && (funct3 == 3'b000) && (inst[31:20] == 12'h001);
@@ -155,9 +194,7 @@ module ysyx_261018 #(
   wire [31:0] rs2_data;
   reg  [31:0] rf_wdata;
   wire        rf_wen_normal = (is_alu_r || is_alu_i || is_load || is_lui || is_auipc || is_jal || is_jalr || is_csr);
-  wire        rf_wen = (BUS_MODE == 0) ? rf_wen_normal :
-                       (state == S_IF_WAIT)  ? (io_ifu_respValid && !is_load && !is_store && rf_wen_normal) :
-                       (state == S_MEM_WAIT) ? (io_lsu_respValid && is_load) : 1'b0;
+  wire        rf_wen = inst_commit && rf_wen_normal && (rd != 5'd0);
 
   ysyx_261018_regfile #(
     .NUM_REGS(32)
@@ -193,8 +230,7 @@ module ysyx_261018 #(
   wire [31:0] mepc_out;
   wire [31:0] csr_wdata_in = (funct3[2] == 1'b1) ? zimm : rs1_data;
   wire        csr_wen_normal = is_csr && (funct3[1:0] == 2'b01 || rs1 != 5'b0);
-  wire        csr_wen = (BUS_MODE == 0) ? csr_wen_normal :
-                        (state == S_IF_WAIT && io_ifu_respValid) ? csr_wen_normal : 1'b0;
+  wire        csr_wen = inst_commit && csr_wen_normal;
 
   ysyx_261018_csr u_csr (
     .clk       (clock),
@@ -204,8 +240,8 @@ module ysyx_261018 #(
     .csr_wdata (csr_wdata_in),
     .csr_wen   (csr_wen),
     .csr_rdata (csr_rdata),
-    .is_ecall  (is_ecall),
-    .is_mret   (is_mret),
+    .is_ecall  (inst_commit && is_ecall),
+    .is_mret   (inst_commit && is_mret),
     .pc        (pc),
     .mtvec_out (mtvec_out),
     .mepc_out  (mepc_out)
@@ -251,8 +287,8 @@ module ysyx_261018 #(
         case (funct3)
           3'b000: alu_op = 5'd10; // MUL
           3'b001: alu_op = 5'd11; // MULH
-          3'b010: alu_op = 5'd13; // MULHSU
-          3'b011: alu_op = 5'd12; // MULHU
+          3'b010: alu_op = 5'd12; // MULHSU
+          3'b011: alu_op = 5'd13; // MULHU
           3'b100: alu_op = 5'd14; // DIV
           3'b101: alu_op = 5'd15; // DIVU
           3'b110: alu_op = 5'd16; // REM
@@ -261,14 +297,14 @@ module ysyx_261018 #(
         endcase
       end else begin
         case (funct3)
-          3'b000: alu_op = (funct7[5]) ? 5'd1 : 5'd0; // SUB : ADD
-          3'b001: alu_op = 5'd2; // SLL
-          3'b010: alu_op = 5'd3; // SLT
-          3'b011: alu_op = 5'd4; // SLTU
-          3'b100: alu_op = 5'd5; // XOR
-          3'b101: alu_op = (funct7[5]) ? 5'd7 : 5'd6; // SRA : SRL
-          3'b110: alu_op = 5'd8; // OR
-          3'b111: alu_op = 5'd9; // AND
+          3'b000: alu_op = inst[30] ? 5'd1 : 5'd0; // SUB : ADD
+          3'b001: alu_op = 5'd2;                   // SLL
+          3'b010: alu_op = 5'd3;                   // SLT
+          3'b011: alu_op = 5'd4;                   // SLTU
+          3'b100: alu_op = 5'd5;                   // XOR
+          3'b101: alu_op = inst[30] ? 5'd7 : 5'd6; // SRA : SRL
+          3'b110: alu_op = 5'd8;                   // OR
+          3'b111: alu_op = 5'd9;                   // AND
           default: alu_op = 5'd0;
         endcase
       end
@@ -278,9 +314,9 @@ module ysyx_261018 #(
   end
 
   wire [31:0] alu_src1 = is_auipc ? pc : rs1_data;
-  wire [31:0] alu_src2 = (is_auipc)            ? immU :
-                         (is_alu_i || is_load) ? immI :
-                         (is_store)            ? immS : rs2_data;
+  wire [31:0] alu_src2 = (is_alu_i || is_load) ? immI :
+                         is_store               ? immS :
+                         is_auipc               ? immU : rs2_data;
   wire [31:0] alu_res;
 
   ysyx_261018_alu u_alu (
@@ -290,10 +326,9 @@ module ysyx_261018 #(
     .res    (alu_res)
   );
 
-  // 8. Memory Access (Load & Store)
+  // 8. Memory Access (Load & Store Data Alignment)
   wire [1:0]  byte_offset = alu_res[1:0];
-  wire [31:0] mem_rdata_raw = (BUS_MODE == 1) ? io_lsu_rdata :
-                              (is_load ? pmem_read(alu_res & ~32'h3, 8'd4) : 32'b0);
+  wire [31:0] mem_rdata_raw = dcache_resp_rdata;
   reg  [31:0] mem_rdata;
 
   always @(*) begin
@@ -369,61 +404,216 @@ module ysyx_261018 #(
       rf_wdata = alu_res;
   end
 
-  // 10. Sequential State Updates
+  // 10. Cache Instances & Arbiter
+  wire        icache_mem_req_valid;
+  wire [31:0] icache_mem_req_addr;
+  wire [7:0]  icache_mem_req_len;
+  wire        icache_mem_resp_valid;
+  wire [31:0] icache_mem_resp_rdata;
+  wire        icache_mem_resp_rlast;
+
+  ysyx_261018_icache #(
+    .SET_WIDTH    (6),
+    .OFFSET_WIDTH (4),
+    .TAG_WIDTH    (22)
+  ) u_icache (
+    .clock          (clock),
+    .reset          (reset),
+    .req_valid      (!reset),
+    .req_addr       (pc),
+    .resp_valid     (icache_resp_valid),
+    .resp_rdata     (icache_resp_rdata),
+    .fence_i        (is_fence_i),
+    .mem_req_valid  (icache_mem_req_valid),
+    .mem_req_addr   (icache_mem_req_addr),
+    .mem_req_len    (icache_mem_req_len),
+    .mem_resp_valid (icache_mem_resp_valid),
+    .mem_resp_rdata (icache_mem_resp_rdata),
+    .mem_resp_rlast (icache_mem_resp_rlast),
+    .hit_count      (icache_hit_cnt),
+    .miss_count     (icache_miss_cnt)
+  );
+
+  wire        dcache_mem_req_valid;
+  wire        dcache_mem_req_write;
+  wire [31:0] dcache_mem_req_addr;
+  wire [7:0]  dcache_mem_req_len;
+  wire [31:0] dcache_mem_req_wdata;
+  wire [3:0]  dcache_mem_req_wstrb;
+  wire        dcache_mem_req_wlast;
+  wire        dcache_mem_resp_valid;
+  wire [31:0] dcache_mem_resp_rdata;
+  wire        dcache_mem_resp_rlast;
+
+  ysyx_261018_dcache #(
+    .SET_WIDTH    (6),
+    .OFFSET_WIDTH (4),
+    .TAG_WIDTH    (22)
+  ) u_dcache (
+    .clock          (clock),
+    .reset          (reset),
+    .req_valid      (!reset && icache_resp_valid && (is_load || is_store)),
+    .req_write      (is_store),
+    .req_addr       (alu_res),
+    .req_wdata      (mem_wdata),
+    .req_wmask      (mem_wmask),
+    .resp_valid     (dcache_resp_valid),
+    .resp_rdata     (dcache_resp_rdata),
+    .fence_i        (is_fence_i),
+    .fence_done     (dcache_fence_done),
+    .mem_req_valid  (dcache_mem_req_valid),
+    .mem_req_write  (dcache_mem_req_write),
+    .mem_req_addr   (dcache_mem_req_addr),
+    .mem_req_len    (dcache_mem_req_len),
+    .mem_req_wdata  (dcache_mem_req_wdata),
+    .mem_req_wstrb  (dcache_mem_req_wstrb),
+    .mem_req_wlast  (dcache_mem_req_wlast),
+    .mem_resp_valid (dcache_mem_resp_valid),
+    .mem_resp_rdata (dcache_mem_resp_rdata),
+    .mem_resp_rlast (dcache_mem_resp_rlast),
+    .hit_count      (dcache_hit_cnt),
+    .miss_count     (dcache_miss_cnt)
+  );
+
+  // Arbiter between ICache and DCache
+  wire        arb_mem_req_valid;
+  wire        arb_mem_req_write;
+  wire [31:0] arb_mem_req_addr;
+  wire [7:0]  arb_mem_req_len;
+  wire [31:0] arb_mem_req_wdata;
+  wire [3:0]  arb_mem_req_wstrb;
+  wire        arb_mem_req_wlast;
+  wire        arb_mem_resp_valid;
+  wire [31:0] arb_mem_resp_rdata;
+  wire        arb_mem_resp_rlast;
+
+  ysyx_261018_cache_arbiter u_arbiter (
+    .clock                 (clock),
+    .reset                 (reset),
+    .icache_mem_req_valid  (icache_mem_req_valid),
+    .icache_mem_req_addr   (icache_mem_req_addr),
+    .icache_mem_req_len    (icache_mem_req_len),
+    .icache_mem_resp_valid (icache_mem_resp_valid),
+    .icache_mem_resp_rdata (icache_mem_resp_rdata),
+    .icache_mem_resp_rlast (icache_mem_resp_rlast),
+    .dcache_mem_req_valid  (dcache_mem_req_valid),
+    .dcache_mem_req_write  (dcache_mem_req_write),
+    .dcache_mem_req_addr   (dcache_mem_req_addr),
+    .dcache_mem_req_len    (dcache_mem_req_len),
+    .dcache_mem_req_wdata  (dcache_mem_req_wdata),
+    .dcache_mem_req_wstrb  (dcache_mem_req_wstrb),
+    .dcache_mem_req_wlast  (dcache_mem_req_wlast),
+    .dcache_mem_resp_valid (dcache_mem_resp_valid),
+    .dcache_mem_resp_rdata (dcache_mem_resp_rdata),
+    .dcache_mem_resp_rlast (dcache_mem_resp_rlast),
+    .mem_req_valid         (arb_mem_req_valid),
+    .mem_req_write         (arb_mem_req_write),
+    .mem_req_addr          (arb_mem_req_addr),
+    .mem_req_len           (arb_mem_req_len),
+    .mem_req_wdata         (arb_mem_req_wdata),
+    .mem_req_wstrb         (arb_mem_req_wstrb),
+    .mem_req_wlast         (arb_mem_req_wlast),
+    .mem_resp_valid        (arb_mem_resp_valid),
+    .mem_resp_rdata        (arb_mem_resp_rdata),
+    .mem_resp_rlast        (arb_mem_resp_rlast)
+  );
+
+  // 11. Simulation Burst Engine (BUS_MODE == 0)
+  reg        sim_mem_resp_valid;
+  reg [31:0] sim_mem_resp_rdata;
+  reg        sim_mem_resp_rlast;
+
+  localparam SIM_MEM_IDLE      = 2'd0;
+  localparam SIM_MEM_BURST     = 2'd1;
+  localparam SIM_MEM_RESP_LAST = 2'd2;
+
+  reg [1:0] sim_mem_state;
+  reg [7:0] sim_beat;
+  reg [31:0] sim_addr;
+  reg [7:0] sim_len;
+  reg       sim_write;
+
   always @(posedge clock) begin
     if (reset) begin
-      pc <= RESET_VAL;
-      state <= S_IF_WAIT;
-      io_ifu_reqValid_r <= 1'b1;
-      io_lsu_reqValid_r <= 1'b0;
-      inst_reg <= 32'b0;
-    end else if (BUS_MODE == 0) begin
-      if (is_store) begin
-        pmem_write(alu_res & ~32'h3, mem_wdata, {4'b0, mem_wmask});
-      end
-      if (is_ebreak) begin
-        npc_ebreak(pc, u_regfile.get_gpr_val(5'd10));
-      end
-      pc <= dnpc;
+      sim_mem_state      <= SIM_MEM_IDLE;
+      sim_beat           <= 8'b0;
+      sim_addr           <= 32'b0;
+      sim_len            <= 8'b0;
+      sim_write          <= 1'b0;
+      sim_mem_resp_valid <= 1'b0;
+      sim_mem_resp_rdata <= 32'b0;
+      sim_mem_resp_rlast <= 1'b0;
     end else begin
-      case (state)
-        S_IF_WAIT: begin
-          if (io_ifu_respValid) begin
-            if (is_load || is_store) begin
-              inst_reg <= io_ifu_rdata;
-              state <= S_MEM_WAIT;
-              io_ifu_reqValid_r <= 1'b0;
-              io_lsu_reqValid_r <= 1'b1;
-            end else begin
-              if (is_ebreak) begin
-                npc_ebreak(pc, u_regfile.get_gpr_val(5'd10));
+      sim_mem_resp_valid <= 1'b0;
+      sim_mem_resp_rlast <= 1'b0;
+
+      case (sim_mem_state)
+        SIM_MEM_IDLE: begin
+          if (BUS_MODE == 0 && arb_mem_req_valid) begin
+            sim_addr  <= arb_mem_req_addr;
+            sim_len   <= arb_mem_req_len;
+            sim_write <= arb_mem_req_write;
+            sim_beat  <= 8'd0;
+            if (arb_mem_req_write) begin
+              pmem_write(arb_mem_req_addr, arb_mem_req_wdata, {4'b0, arb_mem_req_wstrb});
+              if (arb_mem_req_len == 8'd0) begin
+                sim_mem_resp_valid <= 1'b1;
+                sim_mem_resp_rlast <= 1'b1;
+                sim_mem_state      <= SIM_MEM_RESP_LAST;
+              end else begin
+                sim_beat      <= 8'd1;
+                sim_mem_state <= SIM_MEM_BURST;
               end
-              pc <= dnpc;
-              io_ifu_reqValid_r <= 1'b1;
+            end else begin
+              // Read first beat
+              sim_mem_resp_valid <= 1'b1;
+              sim_mem_resp_rdata <= pmem_read(arb_mem_req_addr, 8'd4);
+              sim_mem_resp_rlast <= (arb_mem_req_len == 8'd0);
+              if (arb_mem_req_len > 8'd0) begin
+                sim_beat      <= 8'd1;
+                sim_mem_state <= SIM_MEM_BURST;
+              end else begin
+                sim_mem_state <= SIM_MEM_RESP_LAST;
+              end
             end
           end
         end
-        S_MEM_WAIT: begin
-          if (io_lsu_respValid) begin
-            pc <= dnpc;
-            state <= S_IF_WAIT;
-            io_lsu_reqValid_r <= 1'b0;
-            io_ifu_reqValid_r <= 1'b1;
+
+        SIM_MEM_BURST: begin
+          if (sim_write) begin
+            pmem_write(sim_addr + {22'b0, sim_beat, 2'b00}, arb_mem_req_wdata, {4'b0, arb_mem_req_wstrb});
+            if (sim_beat == sim_len) begin
+              sim_mem_resp_valid <= 1'b1;
+              sim_mem_resp_rlast <= 1'b1;
+              sim_mem_state      <= SIM_MEM_RESP_LAST;
+            end else begin
+              sim_beat <= sim_beat + 8'd1;
+            end
+          end else begin
+            sim_mem_resp_valid <= 1'b1;
+            sim_mem_resp_rdata <= pmem_read(sim_addr + {22'b0, sim_beat, 2'b00}, 8'd4);
+            sim_mem_resp_rlast <= (sim_beat == sim_len);
+            if (sim_beat == sim_len) begin
+              sim_mem_state <= SIM_MEM_RESP_LAST;
+            end else begin
+              sim_beat <= sim_beat + 8'd1;
+            end
           end
+        end
+
+        SIM_MEM_RESP_LAST: begin
+          sim_mem_resp_valid <= 1'b0;
+          sim_mem_resp_rlast <= 1'b0;
+          sim_mem_state      <= SIM_MEM_IDLE;
+        end
+        default: begin
+          sim_mem_state <= SIM_MEM_IDLE;
         end
       endcase
     end
   end
 
-  // 11. AXI4 Master Bridge instantiation
-  wire        axi_req_valid = (is_load || is_store);
-  wire        axi_req_write = is_store;
-  wire [31:0] axi_req_addr  = alu_res & ~32'h3;
-  wire [2:0]  axi_req_size  = (funct3[1:0] == 2'b00) ? 3'b000 :
-                              (funct3[1:0] == 2'b01) ? 3'b001 : 3'b010;
-  wire [7:0]  axi_req_len   = 8'd0;
-  wire [31:0] axi_req_wdata = mem_wdata;
-  wire [3:0]  axi_req_wstrb = mem_wmask;
+  // 12. AXI4 Master Bridge instantiation (BUS_MODE == 1)
   wire        axi_resp_valid;
   wire [31:0] axi_resp_rdata;
   wire        axi_resp_rlast;
@@ -431,13 +621,13 @@ module ysyx_261018 #(
   ysyx_261018_axi_master u_axi_master (
     .clock             (clock),
     .reset             (reset),
-    .req_valid         (axi_req_valid),
-    .req_write         (axi_req_write),
-    .req_addr          (axi_req_addr),
-    .req_size          (axi_req_size),
-    .req_len           (axi_req_len),
-    .req_wdata         (axi_req_wdata),
-    .req_wstrb         (axi_req_wstrb),
+    .req_valid         (BUS_MODE == 1 && arb_mem_req_valid),
+    .req_write         (arb_mem_req_write),
+    .req_addr          (arb_mem_req_addr),
+    .req_size          (3'b010),
+    .req_len           (arb_mem_req_len),
+    .req_wdata         (arb_mem_req_wdata),
+    .req_wstrb         (arb_mem_req_wstrb),
     .resp_valid        (axi_resp_valid),
     .resp_rdata        (axi_resp_rdata),
     .resp_rlast        (axi_resp_rlast),
@@ -473,7 +663,23 @@ module ysyx_261018 #(
     .io_master_rid     (io_master_rid)
   );
 
-  // 12. Tie off AXI Slave inputs/outputs
+  assign arb_mem_resp_valid = (BUS_MODE == 1) ? axi_resp_valid : sim_mem_resp_valid;
+  assign arb_mem_resp_rdata = (BUS_MODE == 1) ? axi_resp_rdata : sim_mem_resp_rdata;
+  assign arb_mem_resp_rlast = (BUS_MODE == 1) ? axi_resp_rlast : sim_mem_resp_rlast;
+
+  // 13. Sequential State Updates
+  always @(posedge clock) begin
+    if (reset) begin
+      pc <= RESET_VAL;
+    end else if (!cpu_stall) begin
+      pc <= dnpc;
+      if (is_ebreak) begin
+        npc_ebreak(pc, u_regfile.get_gpr_val(5'd10));
+      end
+    end
+  end
+
+  // Tie off AXI Slave inputs/outputs
   assign io_slave_awready = 1'b0;
   assign io_slave_wready  = 1'b0;
   assign io_slave_bvalid  = 1'b0;
@@ -486,14 +692,14 @@ module ysyx_261018 #(
   assign io_slave_rlast   = 1'b0;
   assign io_slave_rid     = 4'b0;
 
-  // 13. SimpleBus signal assignments
+  // SimpleBus tie-offs
   assign io_ifu_addr      = pc;
-  assign io_ifu_reqValid  = (BUS_MODE == 1) ? io_ifu_reqValid_r : 1'b0;
+  assign io_ifu_reqValid  = 1'b0;
   assign io_lsu_addr      = alu_res;
-  assign io_lsu_reqValid  = (BUS_MODE == 1) ? io_lsu_reqValid_r : 1'b0;
-  assign io_lsu_size      = funct3[1:0];
-  assign io_lsu_wen       = is_store;
-  assign io_lsu_wdata     = mem_wdata;
-  assign io_lsu_wmask     = mem_wmask;
+  assign io_lsu_reqValid  = 1'b0;
+  assign io_lsu_size      = 2'b00;
+  assign io_lsu_wen       = 1'b0;
+  assign io_lsu_wdata     = 32'b0;
+  assign io_lsu_wmask     = 4'b0;
 
 endmodule
