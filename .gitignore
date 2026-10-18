@@ -1,0 +1,27 @@
+# Build outputs and temporary files
+build/
+obj_dir/
+*.o
+*.d
+*.a
+*.so
+*.out
+
+# Waveform files
+*.vcd
+*.fst
+
+# Archives and packages
+*.tar.gz
+*.tgz
+*.zip
+
+# Logs
+*.log
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
