@@ -8,6 +8,16 @@ Context* __am_irq_handle(Context *c) {
   if (user_handler) {
     Event ev = {0};
     switch (c->mcause) {
+      case 11:
+      case 8:
+      case 9:
+        if (c->GPR1 == -1) {
+          ev.event = EVENT_YIELD;
+        } else {
+          ev.event = EVENT_SYSCALL;
+        }
+        c->mepc += 4;
+        break;
       default: ev.event = EVENT_ERROR; break;
     }
 
@@ -31,7 +41,14 @@ bool cte_init(Context*(*handler)(Event, Context*)) {
 }
 
 Context *kcontext(Area kstack, void (*entry)(void *), void *arg) {
-  return NULL;
+  uintptr_t end = (uintptr_t)kstack.end & ~0xf;
+  Context *c = (Context *)(end - sizeof(Context));
+  memset(c, 0, sizeof(Context));
+  c->mepc = (uintptr_t)entry;
+  c->mstatus = 0x1800;
+  c->gpr[10] = (uintptr_t)arg;
+  c->pdir = NULL;
+  return c;
 }
 
 void yield() {

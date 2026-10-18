@@ -65,6 +65,12 @@ static uint64_t get_time_us() {
   return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 
+static bool g_skip_difftest = false;
+
+static inline bool is_mmio(uint32_t addr) {
+  return (addr >= 0xa0000000u && addr < 0xa2000000u);
+}
+
 // DPI-C: pmem_read
 extern "C" int pmem_read(int raddr, char rlen) {
   uint32_t addr = (uint32_t)raddr;
@@ -74,13 +80,15 @@ extern "C" int pmem_read(int raddr, char rlen) {
     memcpy(&val, &pmem[offset], (rlen > 4) ? 4 : rlen);
     return (int)val;
   }
-  // MMIO RTC read
-  if (addr == 0xa0000048u) {
-    uint64_t us = get_time_us();
-    return (int)(us & 0xffffffff);
-  } else if (addr == 0xa000004cu) {
-    uint64_t us = get_time_us();
-    return (int)(us >> 32);
+  if (is_mmio(addr)) {
+    g_skip_difftest = true;
+    if (addr == 0xa0000048u) {
+      uint64_t us = get_time_us();
+      return (int)(us & 0xffffffff);
+    } else if (addr == 0xa000004cu) {
+      uint64_t us = get_time_us();
+      return (int)(us >> 32);
+    }
   }
   return 0;
 }
@@ -91,19 +99,21 @@ extern "C" void pmem_write(int waddr, int wdata, char wmask) {
   uint32_t data = (uint32_t)wdata;
   uint8_t mask = (uint8_t)wmask;
 
-  // Serial MMIO write
-  if (addr == 0xa00003f8u) {
-    putchar(data & 0xff);
-    fflush(stdout);
-    return;
-  }
-
   if (addr >= PMEM_BASE && addr < PMEM_BASE + PMEM_SIZE) {
     uint32_t offset = addr - PMEM_BASE;
     for (int i = 0; i < 4; i++) {
       if ((mask >> i) & 1) {
         pmem[offset + i] = (data >> (i * 8)) & 0xff;
       }
+    }
+    return;
+  }
+
+  if (is_mmio(addr)) {
+    g_skip_difftest = true;
+    if (addr == 0xa00003f8u) {
+      putchar(data & 0xff);
+      fflush(stdout);
     }
     return;
   }
@@ -137,6 +147,18 @@ static bool check_difftest() {
   if (!difftest_enabled) return true;
 
   set_dpi_scope();
+
+  if (g_skip_difftest) {
+    g_skip_difftest = false;
+    uint32_t dut_regs[33] = {0};
+    for (int i = 0; i < 32; i++) {
+      dut_regs[i] = (uint32_t)get_gpr(i);
+    }
+    dut_regs[32] = (uint32_t)get_pc();
+    ref_difftest_regcpy(dut_regs, DIFFTEST_TO_REF);
+    return true;
+  }
+
   ref_difftest_exec(1);
 
   uint32_t ref_regs[33] = {0};

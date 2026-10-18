@@ -28,7 +28,8 @@ void func(void *arg) {
     lock();
     printf("Thread-%s on CPU #%d\n", arg, cpu_current());
     unlock();
-    for (int volatile i = 0; i < 100000; i++) ;
+    for (int volatile i = 0; i < 1000; i++) ;
+    yield();
   }
 }
 
@@ -67,4 +68,5 @@ int main() {
     task->next    = &tasks[(i + 1) % LENGTH(tasks)];
   }
   mpe_init(mp_entry);
+  return 0;
 }

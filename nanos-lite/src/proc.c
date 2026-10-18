@@ -25,9 +25,12 @@ void init_proc() {
   Log("Initializing processes...");
 
   // load program here
-
+  naive_uload(NULL, "/bin/dummy");
 }
 
 Context* schedule(Context *prev) {
-  return NULL;
+  if (current != NULL) {
+    current->cp = prev;
+  }
+  return prev;
 }

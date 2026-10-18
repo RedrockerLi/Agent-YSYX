@@ -11,6 +11,15 @@ static void __am_timer_config(AM_TIMER_CONFIG_T *cfg) { cfg->present = true; cfg
 static void __am_input_config(AM_INPUT_CONFIG_T *cfg) { cfg->present = true;  }
 static void __am_uart_config(AM_INPUT_CONFIG_T *cfg) { cfg->present = false;  }
 static void __am_audio_config(AM_AUDIO_CONFIG_T *cfg) {cfg->present = false; }
+static void __am_gpu_config(AM_GPU_CONFIG_T *cfg) {
+  *cfg = (AM_GPU_CONFIG_T) {
+    .present = true, .has_accel = false,
+    .width = 400, .height = 300,
+    .vmemsz = 400 * 300 * sizeof(uint32_t)
+  };
+}
+static void __am_gpu_fbdraw(AM_GPU_FBDRAW_T *ctl) {}
+static void __am_gpu_status(AM_GPU_STATUS_T *status) { status->ready = true; }
 
 typedef void (*handler_t)(void *buf);
 static void *lut[128] = {
@@ -21,6 +30,9 @@ static void *lut[128] = {
   [AM_INPUT_KEYBRD] = __am_input_keybrd,
   [AM_UART_CONFIG]  = __am_uart_config,
   [AM_AUDIO_CONFIG] = __am_audio_config,
+  [AM_GPU_CONFIG  ] = __am_gpu_config,
+  [AM_GPU_FBDRAW  ] = __am_gpu_fbdraw,
+  [AM_GPU_STATUS  ] = __am_gpu_status,
 };
 
 static void fail(void *buf) { panic("access nonexist register"); }
