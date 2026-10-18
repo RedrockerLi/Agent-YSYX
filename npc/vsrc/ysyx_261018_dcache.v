@@ -27,6 +27,7 @@ module ysyx_261018_dcache #(
   output reg [31:0] mem_req_wdata,
   output reg [3:0]  mem_req_wstrb,
   output reg        mem_req_wlast,
+  input             mem_grant,
   input             mem_resp_valid,
   input      [31:0] mem_resp_rdata,
   input             mem_resp_rlast,
@@ -241,8 +242,7 @@ module ysyx_261018_dcache #(
         end
 
         S_WB_LINE: begin
-          // Advance write beat on memory accept or per clock
-          if (beat_cnt == 2'b11) begin
+          if (mem_resp_valid) begin
             // Write back complete: start refill
             mem_req_valid <= 1'b1;
             mem_req_write <= 1'b0;
@@ -251,7 +251,7 @@ module ysyx_261018_dcache #(
             mem_req_wlast <= 1'b0;
             beat_cnt      <= 2'b00;
             state         <= S_REFILL;
-          end else begin
+          end else if (mem_grant && (beat_cnt != 2'b11)) begin
             beat_cnt      <= beat_cnt + 2'd1;
             mem_req_wlast <= (beat_cnt == 2'b10);
             case (beat_cnt + 2'd1)
@@ -365,11 +365,11 @@ module ysyx_261018_dcache #(
         end
 
         S_FENCE_WB: begin
-          if (beat_cnt == 2'b11) begin
+          if (mem_resp_valid) begin
             mem_req_valid <= 1'b0;
             mem_req_wlast <= 1'b0;
             state         <= S_FENCE_SCAN;
-          end else begin
+          end else if (mem_grant && (beat_cnt != 2'b11)) begin
             beat_cnt      <= beat_cnt + 2'd1;
             mem_req_wlast <= (beat_cnt == 2'b10);
             case (beat_cnt + 2'd1)

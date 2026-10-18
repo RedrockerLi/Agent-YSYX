@@ -16,8 +16,10 @@ module ysyx_261018_regfile #(
 
   reg [31:0] rf [0:NUM_REGS-1];
 
-  assign rs1_data = (rs1_addr == 5'b0) ? 32'b0 : rf[rs1_addr];
-  assign rs2_data = (rs2_addr == 5'b0) ? 32'b0 : rf[rs2_addr];
+  assign rs1_data = (rs1_addr == 5'b0) ? 32'b0 :
+                    (wen && (rd_addr == rs1_addr)) ? wdata : rf[rs1_addr];
+  assign rs2_data = (rs2_addr == 5'b0) ? 32'b0 :
+                    (wen && (rd_addr == rs2_addr)) ? wdata : rf[rs2_addr];
 
   integer i;
   always @(posedge clk) begin

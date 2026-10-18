@@ -13,6 +13,7 @@ module ysyx_261018_icache #(
   input      [31:0] req_addr,
   output            resp_valid,
   output     [31:0] resp_rdata,
+  input             flush,
   input             fence_i,
 
   // Memory / Refill Interface
@@ -67,11 +68,12 @@ module ysyx_261018_icache #(
   localparam S_REFILL      = 2'd1;
   localparam S_REFILL_DONE = 2'd2;
 
-  reg [1:0]  state;
-  reg [1:0]  refill_beat;
+  reg [1:0]   state;
+  reg [1:0]   refill_beat;
   reg [127:0] refill_buf;
-  reg [31:0] saved_addr;
-  reg        victim_way;
+  reg [31:0]  saved_addr;
+  reg         victim_way;
+  reg         discard_pending;
 
   wire [1:0] saved_word_sel = saved_addr[3:2];
 
@@ -80,22 +82,24 @@ module ysyx_261018_icache #(
                             (saved_word_sel == 2'b10) ? refill_buf[95:64] :
                                                         refill_buf[127:96];
 
-  assign resp_valid = (state == S_IDLE) ? (req_valid && hit) : (state == S_REFILL_DONE);
+  assign resp_valid = (state == S_IDLE) ? (req_valid && hit && !flush) :
+                      (state == S_REFILL_DONE && !discard_pending && !flush);
   assign resp_rdata = (state == S_IDLE) ? (hit0 ? hit0_word : hit1_word) : refill_word;
 
   integer i;
   always @(posedge clock) begin
     if (reset) begin
-      state         <= S_IDLE;
-      mem_req_valid <= 1'b0;
-      mem_req_addr  <= 32'b0;
-      mem_req_len   <= 8'd3;
-      refill_beat   <= 2'b0;
-      refill_buf    <= 128'b0;
-      saved_addr    <= 32'b0;
-      victim_way    <= 1'b0;
-      hit_count     <= 32'b0;
-      miss_count    <= 32'b0;
+      state           <= S_IDLE;
+      mem_req_valid   <= 1'b0;
+      mem_req_addr    <= 32'b0;
+      mem_req_len     <= 8'd3;
+      refill_beat     <= 2'b0;
+      refill_buf      <= 128'b0;
+      saved_addr      <= 32'b0;
+      victim_way      <= 1'b0;
+      discard_pending <= 1'b0;
+      hit_count       <= 32'b0;
+      miss_count      <= 32'b0;
       for (i = 0; i < NUM_SETS; i = i + 1) begin
         way0_valid[i] <= 1'b0;
         way1_valid[i] <= 1'b0;
@@ -108,29 +112,34 @@ module ysyx_261018_icache #(
         way1_valid[i] <= 1'b0;
         lru[i]        <= 1'b0;
       end
-      state         <= S_IDLE;
-      mem_req_valid <= 1'b0;
+      state           <= S_IDLE;
+      mem_req_valid   <= 1'b0;
+      discard_pending <= 1'b0;
     end else begin
       case (state)
         S_IDLE: begin
-          if (req_valid) begin
+          if (req_valid && !flush) begin
             if (hit) begin
               hit_count  <= hit_count + 32'd1;
               lru[index] <= hit0 ? 1'b1 : 1'b0; // set opposite as LRU
             end else begin
-              miss_count    <= miss_count + 32'd1;
-              saved_addr    <= req_addr;
-              victim_way    <= lru[index];
-              mem_req_valid <= 1'b1;
-              mem_req_addr  <= {req_addr[31:4], 4'b0000};
-              mem_req_len   <= 8'd3; // 4 beats = 16 bytes
-              refill_beat   <= 2'b00;
-              state         <= S_REFILL;
+              miss_count      <= miss_count + 32'd1;
+              saved_addr      <= req_addr;
+              victim_way      <= lru[index];
+              mem_req_valid   <= 1'b1;
+              mem_req_addr    <= {req_addr[31:4], 4'b0000};
+              mem_req_len     <= 8'd3; // 4 beats = 16 bytes
+              refill_beat     <= 2'b00;
+              discard_pending <= 1'b0;
+              state           <= S_REFILL;
             end
           end
         end
 
         S_REFILL: begin
+          if (flush) begin
+            discard_pending <= 1'b1;
+          end
           if (mem_resp_valid) begin
             case (refill_beat)
               2'b00: refill_buf[31:0]   <= mem_resp_rdata;
@@ -160,6 +169,7 @@ module ysyx_261018_icache #(
             way1_data[saved_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH]]  <= refill_buf;
             lru[saved_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH]]        <= 1'b0;
           end
+          discard_pending <= 1'b0;
           state <= S_IDLE;
         end
         default: state <= S_IDLE;

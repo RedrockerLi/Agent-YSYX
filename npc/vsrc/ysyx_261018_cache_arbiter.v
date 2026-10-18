@@ -20,6 +20,7 @@ module ysyx_261018_cache_arbiter (
   input      [31:0] dcache_mem_req_wdata,
   input      [3:0]  dcache_mem_req_wstrb,
   input             dcache_mem_req_wlast,
+  output            dcache_mem_grant,
   output            dcache_mem_resp_valid,
   output     [31:0] dcache_mem_resp_rdata,
   output            dcache_mem_resp_rlast,
@@ -94,6 +95,10 @@ module ysyx_261018_cache_arbiter (
     endcase
   end
 
+  // Grant indicator to DCache (active when granted or about to be granted)
+  assign dcache_mem_grant = (grant == GRANT_DCACHE) ||
+                            (grant == GRANT_NONE && dcache_mem_req_valid);
+
   // Responses to masters
   assign dcache_mem_resp_valid = (grant == GRANT_DCACHE) ? mem_resp_valid : 1'b0;
   assign dcache_mem_resp_rdata = mem_resp_rdata;
@@ -119,7 +124,7 @@ module ysyx_261018_cache_arbiter (
 
         GRANT_DCACHE: begin
           if (dcache_mem_req_write) begin
-            if (dcache_mem_req_wlast) begin
+            if (mem_resp_valid) begin
               grant <= GRANT_NONE;
             end
           end else begin

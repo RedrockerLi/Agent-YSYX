@@ -27,12 +27,23 @@ static uint32_t halt_pc = 0;
 
 // Exported from Verilog DPI-C
 extern "C" int get_pc();
+extern "C" int get_commit_pc();
+extern "C" int get_commit_inst();
 extern "C" int get_gpr(int idx);
+
+#define IRINGBUF_SIZE 16
+static struct {
+  uint32_t pc;
+  uint32_t inst;
+} iringbuf[IRINGBUF_SIZE];
+static int iringbuf_head = 0;
 extern "C" int is_inst_commit();
 extern "C" int get_icache_hits();
 extern "C" int get_icache_misses();
 extern "C" int get_dcache_hits();
 extern "C" int get_dcache_misses();
+extern "C" int get_bpu_total();
+extern "C" int get_bpu_correct();
 
 static inline void set_dpi_scope() {
   static svScope scope = NULL;
@@ -141,6 +152,8 @@ extern "C" void npc_ebreak(int pc, int a0) {
   uint32_t ic_misses = (uint32_t)get_icache_misses();
   uint32_t dc_hits   = (uint32_t)get_dcache_hits();
   uint32_t dc_misses = (uint32_t)get_dcache_misses();
+  uint32_t bpu_tot   = (uint32_t)get_bpu_total();
+  uint32_t bpu_cor   = (uint32_t)get_bpu_correct();
 
   printf("================ PERFORMANCE STATISTICS ================\n");
   printf("Total Cycles       : %lu\n", g_cycle_cnt);
@@ -150,21 +163,23 @@ extern "C" void npc_ebreak(int pc, int a0) {
          ic_hits, ic_misses, (ic_hits + ic_misses) ? (100.0 * ic_hits / (ic_hits + ic_misses)) : 0.0);
   printf("DCache Hits        : %u, Misses: %u, Hit Rate: %.2f%%\n",
          dc_hits, dc_misses, (dc_hits + dc_misses) ? (100.0 * dc_hits / (dc_hits + dc_misses)) : 0.0);
+  printf("Branch Prediction  : %u / %u, Accuracy: %.2f%%\n",
+         bpu_cor, bpu_tot, bpu_tot ? (100.0 * bpu_cor / bpu_tot) : 0.0);
   printf("========================================================\n");
 }
 
-static void dump_regs() {
+static void dump_regs(uint32_t commit_pc = 0) {
   set_dpi_scope();
   printf("------- NPC Register State -------\n");
   for (int i = 0; i < 32; i++) {
     printf("%-4s: 0x%08x  ", reg_names[i], get_gpr(i));
     if ((i + 1) % 4 == 0) printf("\n");
   }
-  printf("pc  : 0x%08x\n", (uint32_t)get_pc());
+  printf("pc  : 0x%08x\n", commit_pc);
   printf("----------------------------------\n");
 }
 
-static bool check_difftest() {
+static bool check_difftest(uint32_t commit_pc, uint32_t commit_next_pc) {
   if (!difftest_enabled) return true;
 
   set_dpi_scope();
@@ -175,7 +190,7 @@ static bool check_difftest() {
     for (int i = 0; i < 32; i++) {
       dut_regs[i] = (uint32_t)get_gpr(i);
     }
-    dut_regs[32] = (uint32_t)get_pc();
+    dut_regs[32] = commit_next_pc;
     ref_difftest_regcpy(dut_regs, DIFFTEST_TO_REF);
     return true;
   }
@@ -185,7 +200,7 @@ static bool check_difftest() {
   uint32_t ref_regs[33] = {0};
   ref_difftest_regcpy(ref_regs, DIFFTEST_TO_DUT);
 
-  uint32_t dut_pc = (uint32_t)get_pc();
+  uint32_t dut_pc = commit_pc;
   uint32_t ref_pc = ref_regs[32];
 
   bool mismatch = false;
@@ -201,8 +216,16 @@ static bool check_difftest() {
   }
 
   if (mismatch) {
+    printf("--- iringbuf (most recent instructions) ---\n");
+    for (int i = 0; i < IRINGBUF_SIZE; i++) {
+      int idx = (iringbuf_head + i) % IRINGBUF_SIZE;
+      if (iringbuf[idx].pc != 0) {
+        printf("%s 0x%08x: %08x\n", (idx == (iringbuf_head - 1 + IRINGBUF_SIZE) % IRINGBUF_SIZE) ? "-->" : "   ",
+               iringbuf[idx].pc, iringbuf[idx].inst);
+      }
+    }
     printf("--- DUT State ---\n");
-    dump_regs();
+    dump_regs(commit_pc);
     printf("--- REF State ---\n");
     for (int i = 0; i < 32; i++) {
       printf("%-4s: 0x%08x  ", reg_names[i], ref_regs[i]);
@@ -226,8 +249,12 @@ static void single_cycle() {
 static void step_inst() {
   top->clock = 0;
   top->eval();
+
   set_dpi_scope();
   bool commit = is_inst_commit();
+  uint32_t commit_pc = (uint32_t)get_commit_pc();
+  uint32_t commit_inst = (uint32_t)get_commit_inst();
+  uint32_t commit_next_pc = (uint32_t)get_pc();
 
   top->clock = 1;
   top->eval();
@@ -235,8 +262,11 @@ static void step_inst() {
 
   if (commit) {
     g_inst_cnt++;
+    iringbuf[iringbuf_head].pc = commit_pc;
+    iringbuf[iringbuf_head].inst = commit_inst;
+    iringbuf_head = (iringbuf_head + 1) % IRINGBUF_SIZE;
     if (npc_state == NPC_RUNNING) {
-      check_difftest();
+      check_difftest(commit_pc, commit_next_pc);
     }
   }
 }
