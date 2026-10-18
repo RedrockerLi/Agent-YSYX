@@ -50,7 +50,10 @@ __EXPORT void difftest_raise_intr(word_t NO) {
   cpu.pc = isa_raise_intr(NO, cpu.pc);
 }
 
+extern bool g_difftest_ref_mode;
+
 __EXPORT void difftest_init(int port) {
+  g_difftest_ref_mode = true;
   void init_mem();
   init_mem();
   /* Perform ISA dependent initialization. */

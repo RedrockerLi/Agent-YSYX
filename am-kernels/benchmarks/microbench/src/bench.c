@@ -1,6 +1,8 @@
 #include <am.h>
 #include <benchmark.h>
-#include <limits.h>
+#ifndef ULLONG_MAX
+#define ULLONG_MAX ((uint64_t)-1)
+#endif
 #include <klib-macros.h>
 
 Benchmark *current;
