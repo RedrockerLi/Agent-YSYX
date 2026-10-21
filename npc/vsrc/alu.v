@@ -46,34 +46,12 @@ module alu (
       ALU_MULH:   res = mul_s_s[63:32];
       ALU_MULHU:  res = mul_u_u[63:32];
       ALU_MULHSU: res = mul_s_u[63:32];
-      ALU_DIV: begin
-        if (src2 == 32'b0)
-          res = 32'hffffffff;
-        else if (src1 == 32'h80000000 && src2 == 32'hffffffff)
-          res = 32'h80000000;
-        else
-          res = $signed(src1) / $signed(src2);
-      end
-      ALU_DIVU: begin
-        if (src2 == 32'b0)
-          res = 32'hffffffff;
-        else
-          res = src1 / src2;
-      end
-      ALU_REM: begin
-        if (src2 == 32'b0)
-          res = src1;
-        else if (src1 == 32'h80000000 && src2 == 32'hffffffff)
-          res = 32'b0;
-        else
-          res = $signed(src1) % $signed(src2);
-      end
-      ALU_REMU: begin
-        if (src2 == 32'b0)
-          res = src1;
-        else
-          res = src1 % src2;
-      end
+      // DIV/DIVU/REM/REMU are executed by the multi-cycle div_unit; the
+      // combinational result is unused for these opcodes.
+      ALU_DIV,
+      ALU_DIVU,
+      ALU_REM,
+      ALU_REMU:   res = 32'b0;
       default:    res = 32'b0;
     endcase
   end
