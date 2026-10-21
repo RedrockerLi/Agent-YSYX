@@ -25,7 +25,8 @@ image: image-dep
 	@echo + OBJCOPY "->" $(IMAGE_REL).bin
 	@$(OBJCOPY) -S --set-section-flags .bss=alloc,contents -O binary $(IMAGE).elf $(IMAGE).bin
 
-NPC_EXEC := $(NPC_HOME)/build/ysyx_261018
+TOPNAME ?= cpu_top
+NPC_EXEC := $(NPC_HOME)/build/$(TOPNAME)
 DIFF_REF_SO ?= $(NEMU_HOME)/build/riscv32-nemu-interpreter-so
 
 run: insert-arg

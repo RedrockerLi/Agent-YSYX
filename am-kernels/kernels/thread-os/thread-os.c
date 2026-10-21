@@ -23,10 +23,19 @@ int locked = 0;
 void lock()   { while (atomic_xchg(&locked, 1)); }
 void unlock() { atomic_xchg(&locked, 0); }
 
+static volatile int g_switch_cnt = 0;
+#define MAX_SWITCHES 20
+
 void func(void *arg) {
   while (1) {
     lock();
-    printf("Thread-%s on CPU #%d\n", arg, cpu_current());
+    printf("Thread-%s on CPU #%d\n", (char *)arg, cpu_current());
+    g_switch_cnt++;
+    if (g_switch_cnt >= MAX_SWITCHES) {
+      printf("Thread-OS PASS (%d Context Switches Completed)\n", MAX_SWITCHES);
+      unlock();
+      halt(0);
+    }
     unlock();
     for (int volatile i = 0; i < 1000; i++) ;
     yield();

@@ -8,15 +8,13 @@
 #include <getopt.h>
 #include <sys/time.h>
 
-#include "Vysyx_261018.h"
+#include "Vcpu_top.h"
 #include "verilated.h"
 #include "svdpi.h"
 
-#define PMEM_BASE 0x80000000u
-#define PMEM_SIZE (128 * 1024 * 1024) // 128 MB
+#include "pmem.h"
 
-static uint8_t pmem[PMEM_SIZE];
-static Vysyx_261018 *top = NULL;
+static Vcpu_top *top = NULL;
 static uint64_t g_cycle_cnt = 0;
 static uint64_t g_inst_cnt = 0;
 
@@ -48,7 +46,7 @@ extern "C" int get_bpu_correct();
 static inline void set_dpi_scope() {
   static svScope scope = NULL;
   if (!scope) {
-    scope = svGetScopeFromName("TOP.ysyx_261018");
+    scope = svGetScopeFromName("TOP.cpu_top");
   }
   if (scope) {
     svSetScope(scope);
@@ -74,66 +72,6 @@ static const char *reg_names[32] = {
   "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
   "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
-
-static uint64_t get_time_us() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-}
-
-static bool g_skip_difftest = false;
-
-static inline bool is_mmio(uint32_t addr) {
-  return (addr >= 0xa0000000u && addr < 0xa2000000u);
-}
-
-// DPI-C: pmem_read
-extern "C" int pmem_read(int raddr, char rlen) {
-  uint32_t addr = (uint32_t)raddr;
-  if (addr >= PMEM_BASE && addr < PMEM_BASE + PMEM_SIZE) {
-    uint32_t offset = addr - PMEM_BASE;
-    uint32_t val = 0;
-    memcpy(&val, &pmem[offset], (rlen > 4) ? 4 : rlen);
-    return (int)val;
-  }
-  if (is_mmio(addr)) {
-    g_skip_difftest = true;
-    if (addr == 0xa0000048u) {
-      uint64_t us = get_time_us();
-      return (int)(us & 0xffffffff);
-    } else if (addr == 0xa000004cu) {
-      uint64_t us = get_time_us();
-      return (int)(us >> 32);
-    }
-  }
-  return 0;
-}
-
-// DPI-C: pmem_write
-extern "C" void pmem_write(int waddr, int wdata, char wmask) {
-  uint32_t addr = (uint32_t)waddr;
-  uint32_t data = (uint32_t)wdata;
-  uint8_t mask = (uint8_t)wmask;
-
-  if (addr >= PMEM_BASE && addr < PMEM_BASE + PMEM_SIZE) {
-    uint32_t offset = addr - PMEM_BASE;
-    for (int i = 0; i < 4; i++) {
-      if ((mask >> i) & 1) {
-        pmem[offset + i] = (data >> (i * 8)) & 0xff;
-      }
-    }
-    return;
-  }
-
-  if (is_mmio(addr)) {
-    g_skip_difftest = true;
-    if (addr == 0xa00003f8u) {
-      putchar(data & 0xff);
-      fflush(stdout);
-    }
-    return;
-  }
-}
 
 // DPI-C: npc_ebreak
 extern "C" void npc_ebreak(int pc, int a0) {
@@ -294,7 +232,7 @@ static long load_img(const char *img_file) {
   long size = ftell(fp);
   fseek(fp, 0, SEEK_SET);
   assert(size <= (long)PMEM_SIZE);
-  int ret = fread(pmem, size, 1, fp);
+  int ret = fread(get_pmem(), size, 1, fp);
   assert(ret == 1);
   fclose(fp);
   printf("[npc] Loaded image '%s', size = %ld bytes\n", img_file, size);
@@ -318,7 +256,7 @@ static void init_difftest(const char *ref_so, long img_size) {
   assert(ref_difftest_memcpy && ref_difftest_regcpy && ref_difftest_exec && ref_difftest_init);
 
   ref_difftest_init(1234);
-  ref_difftest_memcpy(PMEM_BASE, pmem, img_size, DIFFTEST_TO_REF);
+  ref_difftest_memcpy(PMEM_BASE, get_pmem(), img_size, DIFFTEST_TO_REF);
 
   uint32_t init_regs[33] = {0};
   init_regs[32] = PMEM_BASE;
@@ -347,7 +285,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  top = new Vysyx_261018;
+  top = new Vcpu_top;
 
   long img_size = load_img(img_file);
   reset_npc(10);
