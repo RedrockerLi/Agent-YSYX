@@ -572,29 +572,19 @@ module cpu_top #(
   reg [31:0] ex_mem_alu_res;
   reg [31:0] ex_mem_store_data;
   reg [3:0]  ex_mem_store_mask;
-  reg [31:0] ex_mem_csr_rdata;
-  reg [31:0] ex_mem_imm;
-  reg [31:0] ex_mem_snpc;
   reg [31:0] ex_mem_next_pc;
   reg [2:0]  ex_mem_funct3;
   reg        ex_mem_is_load;
   reg        ex_mem_is_store;
-  reg        ex_mem_is_csr;
-  reg        ex_mem_is_lui;
-  reg        ex_mem_is_jal_jalr;
   reg        ex_mem_is_ebreak;
   reg        ex_mem_is_fence_i;
 
-  always @(*) begin
-    if (ex_mem_is_csr)
-      ex_mem_val = ex_mem_csr_rdata;
-    else if (ex_mem_is_lui)
-      ex_mem_val = ex_mem_imm;
-    else if (ex_mem_is_jal_jalr)
-      ex_mem_val = ex_mem_snpc;
-    else
-      ex_mem_val = ex_mem_alu_res;
-  end
+  // Writeback value is selected in EX and registered with EX/MEM, so the
+  // forwarding path starts from a flop instead of a combinational mux.
+  wire [31:0] ex_val_next = id_ex_is_csr ? csr_rdata :
+                            id_ex_is_lui ? id_ex_imm :
+                            (id_ex_is_jal || id_ex_is_jalr) ? (id_ex_pc + 32'd4) :
+                            alu_res;
 
   always @(posedge clock) begin
     if (reset) begin
@@ -603,19 +593,14 @@ module cpu_top #(
       ex_mem_inst        <= 32'b0;
       ex_mem_rd          <= 5'b0;
       ex_mem_alu_res     <= 32'b0;
+      ex_mem_val         <= 32'b0;
       ex_mem_store_data  <= 32'b0;
       ex_mem_store_mask  <= 4'b0;
-      ex_mem_csr_rdata   <= 32'b0;
-      ex_mem_imm         <= 32'b0;
-      ex_mem_snpc        <= 32'b0;
       ex_mem_next_pc     <= 32'b0;
       ex_mem_funct3      <= 3'b0;
       ex_mem_rf_wen      <= 1'b0;
       ex_mem_is_load     <= 1'b0;
       ex_mem_is_store    <= 1'b0;
-      ex_mem_is_csr      <= 1'b0;
-      ex_mem_is_lui      <= 1'b0;
-      ex_mem_is_jal_jalr <= 1'b0;
       ex_mem_is_ebreak   <= 1'b0;
       ex_mem_is_fence_i  <= 1'b0;
     end else if (!mem_stall) begin
@@ -624,19 +609,14 @@ module cpu_top #(
       ex_mem_inst        <= id_ex_inst;
       ex_mem_rd          <= id_ex_valid ? id_ex_rd : 5'd0;
       ex_mem_alu_res     <= alu_res;
+      ex_mem_val         <= id_ex_valid ? ex_val_next : 32'b0;
       ex_mem_store_data  <= ex_mem_wdata;
       ex_mem_store_mask  <= ex_mem_wmask;
-      ex_mem_csr_rdata   <= csr_rdata;
-      ex_mem_imm         <= id_ex_imm;
-      ex_mem_snpc        <= id_ex_pc + 32'd4;
       ex_mem_next_pc     <= ex_correct_next_pc;
       ex_mem_funct3      <= id_ex_funct3;
       ex_mem_rf_wen      <= id_ex_valid ? id_ex_rf_wen : 1'b0;
       ex_mem_is_load     <= id_ex_valid ? id_ex_is_load : 1'b0;
       ex_mem_is_store    <= id_ex_valid ? id_ex_is_store : 1'b0;
-      ex_mem_is_csr      <= id_ex_valid ? id_ex_is_csr : 1'b0;
-      ex_mem_is_lui      <= id_ex_valid ? id_ex_is_lui : 1'b0;
-      ex_mem_is_jal_jalr <= id_ex_valid ? (id_ex_is_jal || id_ex_is_jalr) : 1'b0;
       ex_mem_is_ebreak   <= id_ex_valid ? id_ex_is_ebreak : 1'b0;
       ex_mem_is_fence_i  <= id_ex_valid ? id_ex_is_fence_i : 1'b0;
     end
@@ -689,11 +669,7 @@ module cpu_top #(
     endcase
   end
 
-  wire [31:0] mem_final_wdata = ex_mem_is_load     ? mem_rdata :
-                                ex_mem_is_csr      ? ex_mem_csr_rdata :
-                                ex_mem_is_lui      ? ex_mem_imm :
-                                ex_mem_is_jal_jalr ? ex_mem_snpc :
-                                                     ex_mem_alu_res;
+  wire [31:0] mem_final_wdata = ex_mem_is_load ? mem_rdata : ex_mem_val;
 
   // =========================================================================
   // Pipeline Register: MEM / WB
