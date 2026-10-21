@@ -241,3 +241,46 @@ clean:
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
         pnr-harden pnr signoff sim-netlist-iv run-netlist-iv clean
+
+# ==============================================================================
+# 6. Fast STA (additive; does not touch the full backend flow)
+#    Only adds a separate project/workspace under build/backend_fast/ and
+#    writes run artifacts under build/sta_fast/. Existing pnr* targets above
+#    are unchanged.
+# ==============================================================================
+FREQ_MHZ          ?= 100.0
+FAST_BACKEND_DIR   = $(BUILD_DIR)/backend_fast
+FAST_WS            = fast
+FAST_RUN_DIR       = $(BUILD_DIR)/sta_fast
+
+fast-manifest:
+	@mkdir -p $(FAST_BACKEND_DIR)
+	@echo '[design]' > $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'name = "$(TOPNAME)"' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'top = "$(TOPNAME)"' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'rtl = [' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@for f in $(VSRCS_REL); do echo "  \"../../$$f\"," >> $(FAST_BACKEND_DIR)/ecc.toml; done
+	@sed -i '$$ s/,$$//' $(FAST_BACKEND_DIR)/ecc.toml
+	@echo ']' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'clock_port = "clock"' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'frequency_mhz = $(FREQ_MHZ)' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo '' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo '[pdk]' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'name = "ics55"' >> $(FAST_BACKEND_DIR)/ecc.toml
+ifneq ($(ICSPROUT55_HOME),)
+	@echo 'root = "$(ICSPROUT55_HOME)"' >> $(FAST_BACKEND_DIR)/ecc.toml
+endif
+	@echo '' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo '[flow]' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@echo 'preset = "syn_sta"' >> $(FAST_BACKEND_DIR)/ecc.toml
+	@python3 -c 'import json,os; p="$(FAST_BACKEND_DIR)/project.json"; d={"schema_version":1,"project_id":"proj_fast","name":"fast","design_name":"$(TOPNAME)","root_path":os.path.abspath("$(FAST_BACKEND_DIR)"),"workspaces":[{"workspace_id":"$(FAST_WS)","name":"$(TOPNAME)_fast","workspace_path":os.path.abspath("$(FAST_BACKEND_DIR)/$(FAST_WS)"),"start_step":"Synth","end_step":"Synth","status":"unstart"}]}; json.dump(d,open(p,"w"),indent=2)'
+
+sta-fast: fast-manifest
+	@mkdir -p $(FAST_RUN_DIR)
+	FREQ_MHZ=$(FREQ_MHZ) FAST_BACKEND_DIR=$(abspath $(FAST_BACKEND_DIR)) FAST_WS=$(FAST_WS) \
+		bash scripts/sta_fast.sh
+
+sta-fast-clean:
+	rm -rf $(FAST_BACKEND_DIR) $(FAST_RUN_DIR)
+
+.PHONY: sta-fast fast-manifest sta-fast-clean

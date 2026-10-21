@@ -165,5 +165,18 @@ clean:
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
         pnr-harden pnr signoff test-netlist clean
 
+# ------------------------------------------------------------------------------
+# 5. Fast STA (additive; existing physical-design targets are unchanged)
+# ------------------------------------------------------------------------------
+FREQ_MHZ ?= 100.0
+
+sta-fast:
+	$(MAKE) -C npc sta-fast FREQ_MHZ=$(FREQ_MHZ)
+
+sta-fast-clean:
+	$(MAKE) -C npc sta-fast-clean
+
+.PHONY: sta-fast sta-fast-clean
+
 endif
 

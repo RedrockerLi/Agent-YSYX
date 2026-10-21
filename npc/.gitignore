@@ -10,4 +10,7 @@
 !.gitignore
 !README.md
 !AGENTS.md
+!scripts/
+!scripts/*.sh
+!scripts/*.py
 build/
