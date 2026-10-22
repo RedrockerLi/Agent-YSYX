@@ -26,28 +26,52 @@ module alu (
   localparam ALU_REM  = 5'd16;
   localparam ALU_REMU = 5'd17;
 
-  wire signed [63:0] mul_s_s = $signed({{32{src1[31]}}, src1}) * $signed({{32{src2[31]}}, src2});
-  wire        [63:0] mul_u_u = {32'b0, src1} * {32'b0, src2};
-  wire signed [63:0] mul_s_u = $signed({{32{src1[31]}}, src1}) * $signed({32'b0, src2});
+  // The adder/subtractor is shared by ADD, SUB, SLT and SLTU.  A separate
+  // carry-select adder keeps the carry chain out of the mapping's hands.
+  wire [31:0] add_sum;
+  wire [31:0] sub_sum;
+  wire        add_cout;
+  wire        sub_cout;
+
+  adder32 u_add (
+    .a    (src1),
+    .b    (src2),
+    .cin  (1'b0),
+    .sum  (add_sum),
+    .cout (add_cout)
+  );
+
+  adder32 u_sub (
+    .a    (src1),
+    .b    (~src2),
+    .cin  (1'b1),
+    .sum  (sub_sum),
+    .cout (sub_cout)
+  );
+
+  // Signed comparison uses the sign bits when they differ; otherwise the
+  // sign of a-b is sufficient because no overflow can occur in that case.
+  wire slt  = (src1[31] != src2[31]) ? src1[31] : sub_sum[31];
+  wire sltu = ~sub_cout;
 
   always @(*) begin
     case (alu_op)
-      ALU_ADD:    res = src1 + src2;
-      ALU_SUB:    res = src1 - src2;
+      ALU_ADD:    res = add_sum;
+      ALU_SUB:    res = sub_sum;
       ALU_SLL:    res = src1 << src2[4:0];
-      ALU_SLT:    res = ($signed(src1) < $signed(src2)) ? 32'd1 : 32'd0;
-      ALU_SLTU:   res = (src1 < src2) ? 32'd1 : 32'd0;
+      ALU_SLT:    res = {31'b0, slt};
+      ALU_SLTU:   res = {31'b0, sltu};
       ALU_XOR:    res = src1 ^ src2;
       ALU_SRL:    res = src1 >> src2[4:0];
       ALU_SRA:    res = $signed(src1) >>> src2[4:0];
       ALU_OR:     res = src1 | src2;
       ALU_AND:    res = src1 & src2;
-      ALU_MUL:    res = mul_s_s[31:0];
-      ALU_MULH:   res = mul_s_s[63:32];
-      ALU_MULHU:  res = mul_u_u[63:32];
-      ALU_MULHSU: res = mul_s_u[63:32];
-      // DIV/DIVU/REM/REMU are executed by the multi-cycle div_unit; the
-      // combinational result is unused for these opcodes.
+      // MUL/DIV are executed by the multi-cycle MDU units; the ALU result is
+      // unused for these opcodes.
+      ALU_MUL,
+      ALU_MULH,
+      ALU_MULHU,
+      ALU_MULHSU,
       ALU_DIV,
       ALU_DIVU,
       ALU_REM,

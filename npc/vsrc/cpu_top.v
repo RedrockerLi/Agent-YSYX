@@ -126,8 +126,14 @@ module cpu_top #(
   wire        div_done;
   wire        div_start;
   wire        div_accept;
-  wire        ex_div_stall;
+  wire        ex_mdu_stall;
   wire [31:0] div_res;
+
+  wire        mul_busy;
+  wire        mul_done;
+  wire        mul_start;
+  wire        mul_accept;
+  wire [31:0] mul_res;
 
   // Cache Wires
   wire        icache_resp_valid;
@@ -173,7 +179,7 @@ module cpu_top #(
 
   wire if_id_flush = ex_redirect;
   wire if_stall    = !icache_resp_valid;
-  assign pc_stall  = if_stall || id_stall || mem_stall || ex_div_stall;
+  assign pc_stall  = if_stall || id_stall || mem_stall || ex_mdu_stall;
 
   always @(posedge clock) begin
     if (reset || if_id_flush) begin
@@ -231,6 +237,7 @@ module cpu_top #(
   wire id_is_system  = (id_opcode == 7'b1110011);
   wire id_is_fence_i = (id_opcode == 7'b0001111);
   wire id_is_div     = id_is_alu_r && (id_funct7 == 7'b0000001) && id_funct3[2];
+  wire id_is_mul     = id_is_alu_r && (id_funct7 == 7'b0000001) && !id_funct3[2];
 
   wire id_is_ebreak  = id_is_system && (id_funct3 == 3'b000) && (id_inst[31:20] == 12'h001);
   wire id_is_ecall   = id_is_system && (id_funct3 == 3'b000) && (id_inst[31:20] == 12'h000);
@@ -333,7 +340,7 @@ module cpu_top #(
                          ((id_rs1_used && (id_ex_rd == id_rs1)) ||
                           (id_rs2_used && (id_ex_rd == id_rs2)));
 
-  assign id_stall = load_use_hazard || mem_stall || ex_div_stall;
+  assign id_stall = load_use_hazard || mem_stall || ex_mdu_stall;
 
   // =========================================================================
   // Pipeline Register: ID / EX
@@ -364,6 +371,7 @@ module cpu_top #(
   reg        id_ex_is_ebreak;
   reg        id_ex_is_fence_i;
   reg        id_ex_is_div;
+  reg        id_ex_is_mul;
   reg        id_ex_pred_taken;
   reg [31:0] id_ex_pred_target;
 
@@ -400,6 +408,7 @@ module cpu_top #(
       id_ex_is_ebreak   <= 1'b0;
       id_ex_is_fence_i  <= 1'b0;
       id_ex_is_div      <= 1'b0;
+      id_ex_is_mul      <= 1'b0;
       id_ex_pred_taken  <= 1'b0;
       id_ex_pred_target <= 32'b0;
     end else if (mem_stall) begin
@@ -407,8 +416,8 @@ module cpu_top #(
         if (wb_rd == id_ex_rs1) id_ex_rs1_data <= wb_wdata;
         if (wb_rd == id_ex_rs2) id_ex_rs2_data <= wb_wdata;
       end
-    end else if (ex_div_stall) begin
-      // Hold the divide instruction in EX; its operands were latched by div_unit.
+    end else if (ex_mdu_stall) begin
+      // Hold the MDU instruction in EX; its operands were latched by the unit.
     end else begin
       id_ex_valid       <= if_id_valid;
       id_ex_pc          <= if_id_pc;
@@ -439,6 +448,7 @@ module cpu_top #(
       id_ex_is_ebreak   <= if_id_valid ? id_is_ebreak : 1'b0;
       id_ex_is_fence_i  <= if_id_valid ? id_is_fence_i : 1'b0;
       id_ex_is_div      <= if_id_valid ? id_is_div : 1'b0;
+      id_ex_is_mul      <= if_id_valid ? id_is_mul : 1'b0;
       id_ex_pred_taken  <= if_id_pred_taken;
       id_ex_pred_target <= if_id_pred_target;
     end
@@ -478,13 +488,18 @@ module cpu_top #(
     .res    (alu_res)
   );
 
-  // Multi-cycle divide unit.  Divide instructions occupy EX for 8 cycles
-  // (7 stall cycles + the accept cycle).
+  // Multi-cycle MDU.  DIV and MUL instructions occupy EX until their unit
+  // raises done; the result is captured by EX/MEM on the accept cycle.
   assign div_start    = id_ex_valid && id_ex_is_div && !div_busy && !div_done;
   assign div_accept   = div_done && !mem_stall;
-  assign ex_div_stall = id_ex_valid && id_ex_is_div && !div_accept;
+  assign mul_start    = id_ex_valid && id_ex_is_mul && !mul_busy && !mul_done;
+  assign mul_accept   = mul_done && !mem_stall;
+  assign ex_mdu_stall = (id_ex_valid && id_ex_is_div && !div_accept) ||
+                        (id_ex_valid && id_ex_is_mul && !mul_accept);
 
-  div_unit u_div_unit (
+  div_unit #(
+    .DIV_BITS_PER_CYCLE (2)
+  ) u_div_unit (
     .clock  (clock),
     .reset  (reset),
     .start  (div_start),
@@ -495,6 +510,21 @@ module cpu_top #(
     .busy   (div_busy),
     .done   (div_done),
     .res    (div_res)
+  );
+
+  mul_unit #(
+    .MUL_BITS_PER_CYCLE (4)
+  ) u_mul_unit (
+    .clock  (clock),
+    .reset  (reset),
+    .start  (mul_start),
+    .accept (mul_accept),
+    .alu_op (id_ex_alu_op),
+    .src1   (ex_src1),
+    .src2   (ex_src2),
+    .busy   (mul_busy),
+    .done   (mul_done),
+    .res    (mul_res)
   );
 
   // Branch Evaluation
@@ -545,7 +575,7 @@ module cpu_top #(
   );
 
   // Exception / Branch Redirection
-  assign ex_redirect = !mem_stall && !ex_div_stall && id_ex_valid && (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
+  assign ex_redirect = !mem_stall && !ex_mdu_stall && id_ex_valid && (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
 
   assign ex_redirect_target = id_ex_is_ecall   ? mtvec :
                               id_ex_is_mret    ? mepc :
@@ -616,6 +646,7 @@ module cpu_top #(
                             id_ex_is_lui ? id_ex_imm :
                             (id_ex_is_jal || id_ex_is_jalr) ? (id_ex_pc + 32'd4) :
                             id_ex_is_div ? div_res :
+                            id_ex_is_mul ? mul_res :
                             alu_res;
 
   always @(posedge clock) begin
@@ -637,8 +668,8 @@ module cpu_top #(
       ex_mem_is_fence_i  <= 1'b0;
     end else if (mem_stall) begin
       // Hold the older memory instruction in MEM.
-    end else if (ex_div_stall) begin
-      // Bubble the divide out of EX until div_done/accept.
+    end else if (ex_mdu_stall) begin
+      // Bubble the MDU instruction out of EX until done/accept.
       ex_mem_valid       <= 1'b0;
       ex_mem_rd          <= 5'd0;
       ex_mem_alu_res     <= 32'b0;
