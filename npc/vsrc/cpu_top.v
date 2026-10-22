@@ -198,7 +198,7 @@ module cpu_top #(
   wire [2:0]  fetch_req_words = 3'd4 - {1'b0, fetch_req_off};
   wire [31:0] fetch_next_line = {fetch_req_pc[31:4], 4'b0} + 32'd16;
 
-  wire fetch_start = !fetch_pending && (fq_count <= 4'd2) &&
+  wire fetch_start = !fetch_pending && (fq_count <= 4'd3) &&
                      icache_req_ready && !icache_flush;
   wire fq_push     = icache_resp_valid && !icache_flush;
   wire fq_pop      = !id_stall && (fq_count != 4'd0) && !icache_flush;

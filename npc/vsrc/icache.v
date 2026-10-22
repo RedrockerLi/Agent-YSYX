@@ -1,8 +1,11 @@
 `timescale 1ns / 1ps
 
-// 2-way set-associative instruction cache with a synchronous line read.
-// A request is accepted in S_IDLE, the array read and tag check are captured
-// at that edge, and the 128-bit line is returned in S_RESP.
+// 2-way set-associative instruction cache with a banked, two-cycle line read.
+//
+// The 64 sets are split into 8 banks of 8 sets.  The request cycle reads the
+// 8:1 set mux inside every bank into bank registers; the next cycle selects
+// the bank and checks tags.  This keeps the 64:1 mux off one cycle while the
+// fetch FIFO absorbs the extra read latency.
 module icache #(
   parameter SET_WIDTH    = 6,               // 64 sets
   parameter OFFSET_WIDTH = 4,               // 16 bytes (4 words per line)
@@ -35,7 +38,10 @@ module icache #(
   output reg [31:0] miss_count
 );
 
-  localparam NUM_SETS = 1 << SET_WIDTH;
+  localparam NUM_SETS   = 1 << SET_WIDTH;
+  localparam BANK_WIDTH = 3;
+  localparam NUM_BANKS  = 1 << BANK_WIDTH;
+  localparam IN_BANK    = SET_WIDTH - BANK_WIDTH;
 
   reg                 way0_valid [NUM_SETS-1:0];
   reg [TAG_WIDTH-1:0] way0_tag   [NUM_SETS-1:0];
@@ -48,44 +54,73 @@ module icache #(
   reg                 lru        [NUM_SETS-1:0];
 
   localparam S_IDLE        = 3'd0;
-  localparam S_RESP        = 3'd1;
-  localparam S_REFILL      = 3'd2;
-  localparam S_REFILL_DONE = 3'd3;
-  localparam S_DRAIN       = 3'd4;
+  localparam S_READ2       = 3'd1;
+  localparam S_RESP        = 3'd2;
+  localparam S_REFILL      = 3'd3;
+  localparam S_REFILL_DONE = 3'd4;
+  localparam S_DRAIN       = 3'd5;
 
   reg [2:0]   state;
   reg         mem_inflight;
 
   reg [31:0]  saved_addr;
   reg [1:0]   saved_word_sel;
+
+  // Request address decode.
+  wire [BANK_WIDTH-1:0] req_bank    = req_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH+BANK_WIDTH];
+  wire [IN_BANK-1:0]    req_set     = req_addr[OFFSET_WIDTH+BANK_WIDTH-1 : OFFSET_WIDTH];
+  wire [TAG_WIDTH-1:0]  req_tag     = req_addr[31 : OFFSET_WIDTH+SET_WIDTH];
+  wire [1:0]            req_word    = req_addr[3:2];
+
+  // Bank reads: 8:1 set mux per bank, both ways.
+  wire [127:0]         rd0_line  [0:NUM_BANKS-1];
+  wire [127:0]         rd1_line  [0:NUM_BANKS-1];
+  wire [TAG_WIDTH-1:0] rd0_tag   [0:NUM_BANKS-1];
+  wire [TAG_WIDTH-1:0] rd1_tag   [0:NUM_BANKS-1];
+  wire                 rd0_valid [0:NUM_BANKS-1];
+  wire                 rd1_valid [0:NUM_BANKS-1];
+
+  genvar gb;
+  generate
+    for (gb = 0; gb < NUM_BANKS; gb = gb + 1) begin : g_bank
+      wire [SET_WIDTH-1:0] rd_idx = {gb[BANK_WIDTH-1:0], req_set};
+      assign rd0_line[gb]  = way0_data[rd_idx];
+      assign rd1_line[gb]  = way1_data[rd_idx];
+      assign rd0_tag[gb]   = way0_tag[rd_idx];
+      assign rd1_tag[gb]   = way1_tag[rd_idx];
+      assign rd0_valid[gb] = way0_valid[rd_idx];
+      assign rd1_valid[gb] = way1_valid[rd_idx];
+    end
+  endgenerate
+
+  // Stage-1 registers (bank candidates).
+  reg [127:0]         s1_line0  [0:NUM_BANKS-1];
+  reg [127:0]         s1_line1  [0:NUM_BANKS-1];
+  reg [TAG_WIDTH-1:0] s1_tag0   [0:NUM_BANKS-1];
+  reg [TAG_WIDTH-1:0] s1_tag1   [0:NUM_BANKS-1];
+  reg                 s1_valid0 [0:NUM_BANKS-1];
+  reg                 s1_valid1 [0:NUM_BANKS-1];
+  reg [BANK_WIDTH-1:0] s1_bank;
+  reg [TAG_WIDTH-1:0]  s1_tag;
+
+  // Stage-2 selected line and hit.
   reg [127:0] line0_r, line1_r;
   reg         hit0_r, hit1_r;
 
+  // Refill state.
   reg [1:0]   refill_beat;
   reg [127:0] refill_buf;
   reg         victim_way;
-
-  wire [SET_WIDTH-1:0] index_w    = req_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH];
-  wire [TAG_WIDTH-1:0] tag_w      = req_addr[31 : OFFSET_WIDTH+SET_WIDTH];
-  wire [1:0]           word_sel_w = req_addr[3:2];
-
-  wire [SET_WIDTH-1:0] saved_index = saved_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH];
-  wire [TAG_WIDTH-1:0] saved_tag   = saved_addr[31 : OFFSET_WIDTH+SET_WIDTH];
-
-  wire hit0_w = way0_valid[index_w] && (way0_tag[index_w] == tag_w);
-  wire hit1_w = way1_valid[index_w] && (way1_tag[index_w] == tag_w);
-
-  wire [127:0] line0_w = way0_data[index_w];
-  wire [127:0] line1_w = way1_data[index_w];
-
-  wire [2:0] words_served = 3'd4 - {1'b0, word_sel_w};
-  wire [2:0] words_saved  = 3'd4 - {1'b0, saved_word_sel};
 
   assign req_ready  = (state == S_IDLE) && !flush && !fence_i;
   assign resp_valid = ((state == S_RESP && (hit0_r || hit1_r)) ||
                        (state == S_REFILL_DONE)) && !flush && !fence_i;
   assign resp_line  = (state == S_RESP) ? (hit0_r ? line0_r : line1_r) : refill_buf;
   assign resp_word_sel = saved_word_sel;
+
+  wire [SET_WIDTH-1:0] saved_index = saved_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH];
+  wire [TAG_WIDTH-1:0] saved_tag   = saved_addr[31 : OFFSET_WIDTH+SET_WIDTH];
+  wire [2:0] words_saved = 3'd4 - {1'b0, saved_word_sel};
 
   integer i;
   always @(posedge clock) begin
@@ -106,6 +141,16 @@ module icache #(
       mem_inflight    <= 1'b0;
       hit_count       <= 32'b0;
       miss_count      <= 32'b0;
+      s1_bank         <= {BANK_WIDTH{1'b0}};
+      s1_tag          <= {TAG_WIDTH{1'b0}};
+      for (i = 0; i < NUM_BANKS; i = i + 1) begin
+        s1_line0[i]  <= 128'b0;
+        s1_line1[i]  <= 128'b0;
+        s1_tag0[i]   <= {TAG_WIDTH{1'b0}};
+        s1_tag1[i]   <= {TAG_WIDTH{1'b0}};
+        s1_valid0[i] <= 1'b0;
+        s1_valid1[i] <= 1'b0;
+      end
       for (i = 0; i < NUM_SETS; i = i + 1) begin
         way0_valid[i] <= 1'b0;
         way1_valid[i] <= 1'b0;
@@ -120,9 +165,6 @@ module icache #(
         end
       end
       mem_req_valid <= 1'b0;
-      // A redirected fetch may not start a new refill until the outstanding
-      // AXI transaction drains; otherwise the old beats would be mistaken for
-      // the new line.
       if ((mem_inflight || mem_req_ack) && !(mem_resp_valid && mem_resp_rlast)) begin
         mem_inflight <= 1'b1;
         state        <= S_DRAIN;
@@ -135,18 +177,30 @@ module icache #(
         S_IDLE: begin
           if (req_valid) begin
             saved_addr     <= req_addr;
-            saved_word_sel <= word_sel_w;
-            line0_r        <= line0_w;
-            line1_r        <= line1_w;
-            hit0_r         <= hit0_w;
-            hit1_r         <= hit1_w;
-            state          <= S_RESP;
+            saved_word_sel <= req_word;
+            s1_bank        <= req_bank;
+            s1_tag         <= req_tag;
+            for (i = 0; i < NUM_BANKS; i = i + 1) begin
+              s1_line0[i]  <= rd0_line[i];
+              s1_line1[i]  <= rd1_line[i];
+              s1_tag0[i]   <= rd0_tag[i];
+              s1_tag1[i]   <= rd1_tag[i];
+              s1_valid0[i] <= rd0_valid[i];
+              s1_valid1[i] <= rd1_valid[i];
+            end
+            state <= S_READ2;
           end
         end
 
+        S_READ2: begin
+          line0_r <= s1_line0[s1_bank];
+          line1_r <= s1_line1[s1_bank];
+          hit0_r  <= s1_valid0[s1_bank] && (s1_tag0[s1_bank] == s1_tag);
+          hit1_r  <= s1_valid1[s1_bank] && (s1_tag1[s1_bank] == s1_tag);
+          state   <= S_RESP;
+        end
+
         S_RESP: begin
-          // The hit decision, LRU update and refill start use the registers
-          // captured at the request edge, not the array mux output.
           if (hit0_r || hit1_r) begin
             hit_count       <= hit_count + {29'b0, words_saved};
             lru[saved_index] <= hit0_r ? 1'b1 : 1'b0;
@@ -184,14 +238,6 @@ module icache #(
           end
         end
 
-        S_DRAIN: begin
-          mem_req_valid <= 1'b0;
-          if (mem_resp_valid && mem_resp_rlast) begin
-            mem_inflight <= 1'b0;
-            state        <= S_IDLE;
-          end
-        end
-
         S_REFILL_DONE: begin
           if (victim_way == 1'b0) begin
             way0_valid[saved_index] <= 1'b1;
@@ -205,6 +251,14 @@ module icache #(
             lru[saved_index]        <= 1'b0;
           end
           state <= S_IDLE;
+        end
+
+        S_DRAIN: begin
+          mem_req_valid <= 1'b0;
+          if (mem_resp_valid && mem_resp_rlast) begin
+            mem_inflight <= 1'b0;
+            state        <= S_IDLE;
+          end
         end
 
         default: state <= S_IDLE;
