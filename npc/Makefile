@@ -23,6 +23,7 @@ OBJ_DIR          = $(BUILD_DIR)/obj_dir
 BIN              = $(BUILD_DIR)/$(TOPNAME)
 BACKEND_DIR      = $(BUILD_DIR)/backend
 WORKSPACE       ?= default
+BACKEND_FREQ_MHZ ?= 100.0
 
 # Verilator Compilation Flags
 VERILATOR_CFLAGS += -MMD --build -cc \
@@ -104,7 +105,7 @@ $(BACKEND_DIR)/ecc.toml:
 	@sed -i '$$ s/,$$//' $@
 	@echo ']' >> $@
 	@echo 'clock_port = "clock"' >> $@
-	@echo 'frequency_mhz = 100.0' >> $@
+	@echo 'frequency_mhz = $(BACKEND_FREQ_MHZ)' >> $@
 	@echo '' >> $@
 	@echo '[pdk]' >> $@
 	@echo 'name = "ics55"' >> $@
@@ -226,13 +227,21 @@ signoff:
 	@echo ">>> Signoff package exported."
 
 # One-Command Full Physical Design (RTL-to-GDSII)
+PNR_OVERWRITE ?=
+
 pnr: $(BACKEND_DIR)/project.json
 	@echo ">>> Starting automated physical design pipeline (Synthesis -> Floorplan -> Placement -> CTS -> Sizer -> Route -> RCX -> STA -> Harden)..."
-	$(ECC) run --project $(BACKEND_DIR) --workspace $(WORKSPACE)
+	$(ECC) run --project $(BACKEND_DIR) --workspace $(WORKSPACE) $(PNR_OVERWRITE)
 	@gunzip -k -f $(BACKEND_DIR)/$(WORKSPACE)/Synthesis_yosys/output/$(TOPNAME)_Synthesis_sim.v.gz 2>/dev/null || true
 	@echo ">>> Physical design pipeline finished. Packaging signoff deliverables..."
 	-$(MAKE) signoff
 	@echo ">>> Full physical design flow completed successfully."
+
+# Full flow with an explicitly requested clock frequency and a fresh workspace.
+# Removes the generated backend manifests so frequency_mhz is re-emitted.
+pnr-freq:
+	@rm -f $(BACKEND_DIR)/ecc.toml $(BACKEND_DIR)/project.json
+	@$(MAKE) pnr BACKEND_FREQ_MHZ=$(BACKEND_FREQ_MHZ) WORKSPACE=$(WORKSPACE) PNR_OVERWRITE=--overwrite
 
 clean:
 	rm -rf $(BUILD_DIR)
@@ -240,7 +249,7 @@ clean:
 .PHONY: default sim run sim-vpi sim-iverilog run-iverilog \
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
-        pnr-harden pnr signoff sim-netlist-iv run-netlist-iv clean
+        pnr-harden pnr pnr-freq signoff sim-netlist-iv run-netlist-iv clean
 
 # ==============================================================================
 # 6. Fast STA (additive; does not touch the full backend flow)
@@ -249,6 +258,7 @@ clean:
 #    are unchanged.
 # ==============================================================================
 FREQ_MHZ          ?= 100.0
+YOSYS_SYNTH_STRATEGY ?= DELAY 4
 FAST_BACKEND_DIR   = $(BUILD_DIR)/backend_fast
 FAST_WS            = fast
 FAST_RUN_DIR       = $(BUILD_DIR)/sta_fast
@@ -278,6 +288,7 @@ endif
 sta-fast: fast-manifest
 	@mkdir -p $(FAST_RUN_DIR)
 	FREQ_MHZ=$(FREQ_MHZ) FAST_BACKEND_DIR=$(abspath $(FAST_BACKEND_DIR)) FAST_WS=$(FAST_WS) \
+		YOSYS_SYNTH_STRATEGY="$(YOSYS_SYNTH_STRATEGY)" \
 		bash scripts/sta_fast.sh
 
 sta-fast-clean:

@@ -102,8 +102,16 @@ bench-micro:
 synth pnr-synth:
 	$(MAKE) -C npc pnr-synth
 
+BACKEND_FREQ_MHZ ?= 100.0
+WORKSPACE ?= default
+
 pnr:
 	$(MAKE) -C npc pnr
+
+# Full RTL-to-GDSII run with an explicit frequency and a fresh workspace.
+# Usage: make pnr-freq BACKEND_FREQ_MHZ=550 WORKSPACE=freq550
+pnr-freq:
+	$(MAKE) -C npc pnr-freq BACKEND_FREQ_MHZ=$(BACKEND_FREQ_MHZ) WORKSPACE=$(WORKSPACE)
 
 pnr-floorplan:
 	$(MAKE) -C npc pnr-floorplan
@@ -163,15 +171,16 @@ clean:
         bench bench-coremark bench-dhrystone bench-micro \
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
-        pnr-harden pnr signoff test-netlist clean
+        pnr-harden pnr pnr-freq signoff test-netlist clean
 
 # ------------------------------------------------------------------------------
 # 5. Fast STA (additive; existing physical-design targets are unchanged)
 # ------------------------------------------------------------------------------
 FREQ_MHZ ?= 100.0
+YOSYS_SYNTH_STRATEGY ?= DELAY 4
 
 sta-fast:
-	$(MAKE) -C npc sta-fast FREQ_MHZ=$(FREQ_MHZ)
+	$(MAKE) -C npc sta-fast FREQ_MHZ=$(FREQ_MHZ) YOSYS_SYNTH_STRATEGY="$(YOSYS_SYNTH_STRATEGY)"
 
 sta-fast-clean:
 	$(MAKE) -C npc sta-fast-clean

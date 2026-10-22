@@ -240,7 +240,7 @@ def top_paths_from_json(path: Path | None) -> list[dict[str, Any]]:
                 "[sta-fast] WARNING: no slack entries found in timing_paths.json",
                 file=sys.stderr,
             )
-    return paths[:10]
+    return paths
 
 
 def sha256_files(files: Iterable[Path]) -> str | None:
@@ -344,6 +344,7 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--freq", required=True)
+    parser.add_argument("--strategy", default="")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--workspace-path", required=True)
     parser.add_argument("--vsrc-dir", required=True)
@@ -363,6 +364,20 @@ def main() -> int:
     wns = summary["wns_ns"]
     tns = summary["tns_ns"]
     paths = top_paths_from_json(feature_path)
+    setup_paths = [
+        path for path in paths
+        if str(path.get("analysis_type") or "").lower() == "setup"
+    ]
+    hold_paths = [
+        path for path in paths
+        if str(path.get("analysis_type") or "").lower() == "hold"
+    ]
+    # Some report schemas omit analysis_type; fall back to treating every
+    # parsed path as a setup path rather than dropping the data.
+    if not setup_paths and paths:
+        setup_paths = paths
+    setup_paths.sort(key=lambda item: item["slack_ns"])
+    hold_paths.sort(key=lambda item: item["slack_ns"])
     rtl_hash, origin_hash, origin_mismatch = rtl_and_origin_hashes(
         Path(args.vsrc_dir), workspace_path
     )
@@ -376,6 +391,7 @@ def main() -> int:
         "git_rev": git_rev,
         "git_dirty": git_dirty,
         "frequency_mhz": float(args.freq),
+        "synth_strategy": args.strategy or None,
         "workspace": args.workspace,
         "report": display_path(report_path, repo_dir),
         "feature": display_path(feature_path, repo_dir)
@@ -387,7 +403,10 @@ def main() -> int:
         "hold_tns_ns": summary["hold_tns_ns"],
         "nvp": summary["nvp"],
         "estimated_fmax_mhz": summary["estimated_fmax_mhz"],
-        "top_paths": paths,
+        "setup_wns_ns": setup_paths[0]["slack_ns"] if setup_paths else wns,
+        "setup_top_paths": setup_paths[:10],
+        "hold_top_paths": hold_paths[:10],
+        "top_paths": setup_paths[:10],
         "rtl_sha256": rtl_hash,
         "origin_rtl_sha256": origin_hash,
         "origin_mismatch": origin_mismatch,
@@ -405,17 +424,20 @@ def main() -> int:
         f"[sta-fast] run={args.run_id} freq={float(args.freq):g}MHz "
         f"WNS={fmt(wns)}ns TNS={fmt(tns)}ns{fmax_text}"
     )
-    if paths:
-        worst = next(
-            (path for path in paths if path.get("analysis_type") == "setup"),
-            paths[0],
-        )
+    if setup_paths:
+        worst = setup_paths[0]
         print(
-            f"[sta-fast] worst: {worst.get('start')} -> {worst.get('end')} "
-            f"slack={fmt(worst.get('slack_ns'))}ns"
+            f"[sta-fast] worst-setup: {worst.get('start')} -> {worst.get('end')} "
+            f"slack={fmt(worst.get('slack_ns'))}ns levels={worst.get('logic_levels')}"
         )
     else:
-        print("[sta-fast] no parsed timing paths (see warnings above)")
+        print("[sta-fast] no parsed setup paths (see warnings above)")
+    if hold_paths:
+        worst_hold = hold_paths[0]
+        print(
+            f"[sta-fast] worst-hold: {worst_hold.get('start')} -> {worst_hold.get('end')} "
+            f"slack={fmt(worst_hold.get('slack_ns'))}ns"
+        )
     print(f"[sta-fast] manifest: {out_path}")
 
     if origin_mismatch:

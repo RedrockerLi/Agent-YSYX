@@ -13,7 +13,13 @@ RUN_ID=${RUN_ID:-"$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || ech
 RUN_DIR="$NPC_DIR/build/sta_fast/$RUN_ID"
 mkdir -p "$RUN_DIR"
 
-echo "[sta-fast] run_id=$RUN_ID freq=${FREQ}MHz"
+# Yosys ABC strategy (DELAY 0-13, AREA 0-12, BALANCE 0-7).  Export it so
+# ECC/Yosys can pick it up from the environment; the generated synthesis
+# script reads $env(YOSYS_SYNTH_STRATEGY).
+STRATEGY=${YOSYS_SYNTH_STRATEGY:-"DELAY 4"}
+export YOSYS_SYNTH_STRATEGY="$STRATEGY"
+
+echo "[sta-fast] run_id=$RUN_ID freq=${FREQ}MHz strategy=${STRATEGY}"
 echo "[sta-fast] project=$BUILD workspace=$WS"
 echo "[sta-fast] log=$RUN_DIR/run.log"
 
@@ -55,6 +61,7 @@ python3 "$NPC_DIR/scripts/sta_summary.py" \
   --out "$RUN_DIR/manifest.json" \
   --run-id "$RUN_ID" \
   --freq "$FREQ" \
+  --strategy "$STRATEGY" \
   --workspace "$WS" \
   --workspace-path "$BUILD/$WS" \
   --vsrc-dir "$NPC_DIR/vsrc" \
