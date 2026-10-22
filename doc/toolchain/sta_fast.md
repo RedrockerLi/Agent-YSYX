@@ -71,7 +71,7 @@ npc/build/backend_fast/fast/Synthesis_yosys/feature/post_synthesis/timing_paths.
 - STA 阶段实测 ECC 进程 RSS 约 20GB（`flow.json` 记录的 Synthesis peak memory 约 1.6GB）；建议在 30GB 内存的机器上单独运行，避免与其他大内存任务并发。
 - 综合后 SS 角：WNS **-24.255ns**、TNS **-2180.2ns**、Fmax 估计 **29MHz**、hold WNS **+0.213ns**、NVP 509。
 - 最差路径：`ex_mem_is_jal_jalr_reg_p:Q -> io_lsu_addr[30]_reg_p:D`，slack -24.255ns，259 个组合单元级。
-- 这些数值与 `doc/toolchain/baseline.md` 中记录的综合后 SS 角数据一致。
+- 这些数值与 [CPU 基线报告 5.2 节](../cpu/baseline.md#52-icsprout55-逻辑综合与-ppa-评估-asic-synthesis--ppa-metrics)中记录的综合后 SS 角数据一致。
 
 ## 限制
 
