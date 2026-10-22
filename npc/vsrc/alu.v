@@ -1,9 +1,18 @@
 `timescale 1ns / 1ps
 
+// Two-cycle ALU.  The low 16 bits are added in the start cycle; the high
+// 16 bits and the final result are produced in the next cycle.  The CPU
+// holds the instruction in EX until `done`, like the multi-cycle MDU.
 module alu (
-  input  [4:0]  alu_op,
-  input  [31:0] src1,
-  input  [31:0] src2,
+  input             clock,
+  input             reset,
+  input             start,
+  input             accept,
+  input      [4:0]  alu_op,
+  input      [31:0] src1,
+  input      [31:0] src2,
+  output reg        busy,
+  output            done,
   output reg [31:0] res
 );
 
@@ -17,67 +26,80 @@ module alu (
   localparam ALU_SRA  = 5'd7;
   localparam ALU_OR   = 5'd8;
   localparam ALU_AND  = 5'd9;
-  localparam ALU_MUL  = 5'd10;
-  localparam ALU_MULH = 5'd11;
-  localparam ALU_MULHU= 5'd12;
-  localparam ALU_MULHSU=5'd13;
-  localparam ALU_DIV  = 5'd14;
-  localparam ALU_DIVU = 5'd15;
-  localparam ALU_REM  = 5'd16;
-  localparam ALU_REMU = 5'd17;
 
-  // The adder/subtractor is shared by ADD, SUB, SLT and SLTU.  A separate
-  // carry-select adder keeps the carry chain out of the mapping's hands.
-  wire [31:0] add_sum;
-  wire [31:0] sub_sum;
-  wire        add_cout;
-  wire        sub_cout;
+  localparam S_IDLE = 2'd0;
+  localparam S_HIGH = 2'd1;
+  localparam S_DONE = 2'd2;
 
-  adder32 u_add (
-    .a    (src1),
-    .b    (src2),
-    .cin  (1'b0),
-    .sum  (add_sum),
-    .cout (add_cout)
-  );
+  reg [1:0]  state;
+  reg [4:0]  op_r;
+  reg [31:0] a_r, b_r;
+  reg [16:0] low_r;
+  reg        done_r;
 
-  adder32 u_sub (
-    .a    (src1),
-    .b    (~src2),
-    .cin  (1'b1),
-    .sum  (sub_sum),
-    .cout (sub_cout)
-  );
+  assign done = done_r;
 
-  // Signed comparison uses the sign bits when they differ; otherwise the
-  // sign of a-b is sufficient because no overflow can occur in that case.
-  wire slt  = (src1[31] != src2[31]) ? src1[31] : sub_sum[31];
-  wire sltu = ~sub_cout;
+  wire op_sub  = (alu_op == ALU_SUB) || (alu_op == ALU_SLT) || (alu_op == ALU_SLTU);
+  wire [31:0] b_lo = op_sub ? ~src2 : src2;
+  wire [16:0] low_w = {1'b0, src1[15:0]} + {1'b0, b_lo[15:0]} + {{16{1'b0}}, op_sub};
 
-  always @(*) begin
-    case (alu_op)
-      ALU_ADD:    res = add_sum;
-      ALU_SUB:    res = sub_sum;
-      ALU_SLL:    res = src1 << src2[4:0];
-      ALU_SLT:    res = {31'b0, slt};
-      ALU_SLTU:   res = {31'b0, sltu};
-      ALU_XOR:    res = src1 ^ src2;
-      ALU_SRL:    res = src1 >> src2[4:0];
-      ALU_SRA:    res = $signed(src1) >>> src2[4:0];
-      ALU_OR:     res = src1 | src2;
-      ALU_AND:    res = src1 & src2;
-      // MUL/DIV are executed by the multi-cycle MDU units; the ALU result is
-      // unused for these opcodes.
-      ALU_MUL,
-      ALU_MULH,
-      ALU_MULHU,
-      ALU_MULHSU,
-      ALU_DIV,
-      ALU_DIVU,
-      ALU_REM,
-      ALU_REMU:   res = 32'b0;
-      default:    res = 32'b0;
-    endcase
+  wire op_sub_r = (op_r == ALU_SUB) || (op_r == ALU_SLT) || (op_r == ALU_SLTU);
+  wire [31:0] b_hi = op_sub_r ? ~b_r : b_r;
+  wire [16:0] high_w = {1'b0, a_r[31:16]} + {1'b0, b_hi[31:16]} + {{16{1'b0}}, low_r[16]};
+  wire [31:0] add_res = {high_w[15:0], low_r[15:0]};
+
+  always @(posedge clock) begin
+    if (reset) begin
+      state  <= S_IDLE;
+      busy   <= 1'b0;
+      done_r <= 1'b0;
+      res    <= 32'b0;
+      op_r   <= 5'b0;
+      a_r    <= 32'b0;
+      b_r    <= 32'b0;
+      low_r  <= 17'b0;
+    end else begin
+      case (state)
+        S_IDLE: begin
+          if (start) begin
+            op_r  <= alu_op;
+            a_r   <= src1;
+            b_r   <= src2;
+            low_r <= low_w;
+            busy  <= 1'b1;
+            state <= S_HIGH;
+          end
+        end
+
+        S_HIGH: begin
+          case (op_r)
+            ALU_ADD,
+            ALU_SUB:  res <= add_res;
+            ALU_SLT:  res <= {31'b0, (a_r[31] != b_r[31]) ? a_r[31] : high_w[15]};
+            ALU_SLTU: res <= {31'b0, ~high_w[16]};
+            ALU_SLL:  res <= a_r << b_r[4:0];
+            ALU_SRL:  res <= a_r >> b_r[4:0];
+            ALU_SRA:  res <= $signed(a_r) >>> b_r[4:0];
+            ALU_XOR:  res <= a_r ^ b_r;
+            ALU_OR:   res <= a_r | b_r;
+            ALU_AND:  res <= a_r & b_r;
+            default:  res <= 32'b0;
+          endcase
+          done_r <= 1'b1;
+          state  <= S_DONE;
+        end
+
+        S_DONE: begin
+          if (accept) begin
+            busy   <= 1'b0;
+            done_r <= 1'b0;
+            state  <= S_IDLE;
+          end
+        end
+
+        default: state <= S_IDLE;
+      endcase
+    end
   end
 
 endmodule

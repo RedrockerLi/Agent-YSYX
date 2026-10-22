@@ -126,7 +126,11 @@ module cpu_top #(
   wire        div_start;
   wire        div_accept;
   wire        ex_mdu_stall;
-  wire        ex_jalr_stall;
+  wire        ex_alu_stall;
+  wire        alu_busy;
+  wire        alu_done;
+  wire        alu_start;
+  wire        alu_accept;
   wire [31:0] div_res;
 
   wire        mul_busy;
@@ -482,7 +486,7 @@ module cpu_top #(
                          ((id_rs1_used && (id_ex_rd == id_rs1)) ||
                           (id_rs2_used && (id_ex_rd == id_rs2)));
 
-  assign id_stall = load_use_hazard || mem_stall || ex_mdu_stall || ex_jalr_stall;
+  assign id_stall = load_use_hazard || mem_stall || ex_mdu_stall || ex_alu_stall;
 
   // =========================================================================
   // Pipeline Register: ID / EX
@@ -517,7 +521,11 @@ module cpu_top #(
   reg        id_ex_pred_taken;
   reg [31:0] id_ex_pred_target;
 
-  wire id_ex_flush = (!mem_stall && (ex_redirect || load_use_hazard)) || fence_flush;
+  // A load-use consumer stays in ID while the multi-cycle ALU still owns the
+  // load in EX.  Only insert the bubble on the ALU accept cycle.
+  wire id_ex_flush = (!mem_stall &&
+                      (ex_redirect || (load_use_hazard && !ex_alu_stall))) ||
+                     fence_flush;
 
   always @(posedge clock) begin
     if (reset || id_ex_flush) begin
@@ -558,7 +566,7 @@ module cpu_top #(
         if (wb_rd == id_ex_rs1) id_ex_rs1_data <= wb_wdata;
         if (wb_rd == id_ex_rs2) id_ex_rs2_data <= wb_wdata;
       end
-    end else if (ex_mdu_stall || ex_jalr_stall) begin
+    end else if (ex_mdu_stall || ex_alu_stall) begin
       // Hold the MDU instruction in EX; its operands were latched by the unit.
     end else begin
       id_ex_valid       <= if_id_valid;
@@ -627,21 +635,15 @@ module cpu_top #(
                         (mem_wb_valid && mem_wb_rf_wen && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs2)) ? mem_wb_wdata :
                         id_ex_rs2_data;
 
-  // ALU Input MUXes
-  wire [31:0] alu_in1 = id_ex_is_auipc ? id_ex_pc : ex_src1;
-  wire [31:0] alu_in2 = (id_ex_is_alu_i || id_ex_is_load || id_ex_is_store || id_ex_is_auipc) ? id_ex_imm : ex_src2;
+  // ALU Input MUXes.  Branch/JAL targets use the ALU as well (pc+imm), so
+  // the two-cycle ALU also covers the PC-relative target add.
+  wire [31:0] alu_in1 = (id_ex_is_auipc || id_ex_is_branch || id_ex_is_jal) ? id_ex_pc : ex_src1;
+  wire [31:0] alu_in2 = (id_ex_is_alu_i || id_ex_is_load || id_ex_is_store ||
+                         id_ex_is_auipc || id_ex_is_branch ||
+                         id_ex_is_jal || id_ex_is_jalr) ? id_ex_imm : ex_src2;
 
-  // PC-relative targets use the carry-select adder, not the generic +.
-  wire [31:0] ex_pc_plus_imm, ex_pc_plus4;
-  wire        ex_pcimm_cout, ex_pc4_cout;
-
-  adder32 u_ex_pcimm (
-    .a    (id_ex_pc),
-    .b    (id_ex_imm),
-    .cin  (1'b0),
-    .sum  (ex_pc_plus_imm),
-    .cout (ex_pcimm_cout)
-  );
+  wire [31:0] ex_pc_plus4;
+  wire        ex_pc4_cout;
 
   adder32 u_ex_pc4 (
     .a    (id_ex_pc),
@@ -651,13 +653,37 @@ module cpu_top #(
     .cout (ex_pc4_cout)
   );
 
+  // The ALU is multi-cycle; the instruction occupies EX until `done`.
+  wire is_alu_op = id_ex_valid && (id_ex_is_alu_r || id_ex_is_alu_i ||
+                   id_ex_is_load || id_ex_is_store || id_ex_is_auipc ||
+                   id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr);
+  assign alu_start    = is_alu_op && !alu_busy && !alu_done && !ex_redirect_r;
+  assign alu_accept   = alu_done && !mem_stall;
+  assign ex_alu_stall = is_alu_op && !alu_accept;
+
   wire [31:0] alu_res;
   alu u_alu (
+    .clock  (clock),
+    .reset  (reset),
+    .start  (alu_start),
+    .accept (alu_accept),
     .alu_op (id_ex_alu_op),
     .src1   (alu_in1),
     .src2   (alu_in2),
+    .busy   (alu_busy),
+    .done   (alu_done),
     .res    (alu_res)
   );
+
+  // Capture the store data at the ALU start, when the forwarding sources
+  // still match the operands that were selected for this instruction.
+  reg [31:0] store_data_r;
+  always @(posedge clock) begin
+    if (reset)
+      store_data_r <= 32'b0;
+    else if (alu_start && id_ex_is_store)
+      store_data_r <= ex_src2;
+  end
 
   // Multi-cycle MDU.  DIV and MUL instructions occupy EX until their unit
   // raises done; the result is captured by EX/MEM on the accept cycle.
@@ -715,49 +741,25 @@ module cpu_top #(
     endcase
   end
 
-  // JALR target: the forwarded src1 is captured in the first EX cycle, and
-  // the target adder runs from those flops in the second EX cycle.
-  reg        jalr_phase;
-  reg [31:0] jalr_src1_r;
-  reg [31:0] jalr_imm_r;
-  assign ex_jalr_stall = id_ex_valid && id_ex_is_jalr && !jalr_phase && !ex_redirect;
-  wire [31:0] ex_jalr_sum;
-  wire        ex_jalr_cout;
-  adder32 u_ex_jalr (
-    .a    (jalr_src1_r),
-    .b    (jalr_imm_r),
-    .cin  (1'b0),
-    .sum  (ex_jalr_sum),
-    .cout (ex_jalr_cout)
-  );
-  wire [31:0] jalr_target = ex_jalr_sum & ~32'h1;
-
+  // The branch condition is sampled when the ALU starts, so the redirect in
+  // the ALU accept cycle uses a stable value.
+  reg branch_met_r;
   always @(posedge clock) begin
-    if (reset) begin
-      jalr_phase  <= 1'b0;
-      jalr_src1_r <= 32'b0;
-      jalr_imm_r  <= 32'b0;
-    end else if (!mem_stall && !ex_mdu_stall) begin
-      if (id_ex_valid && id_ex_is_jalr && !jalr_phase && !ex_redirect) begin
-        jalr_src1_r <= ex_src1;
-        jalr_imm_r  <= id_ex_imm;
-        jalr_phase  <= 1'b1;
-      end else begin
-        jalr_phase  <= 1'b0;
-      end
-    end
+    if (reset)
+      branch_met_r <= 1'b0;
+    else if (alu_start)
+      branch_met_r <= branch_cond_met;
   end
 
-  wire ex_actual_taken = id_ex_is_branch ? branch_cond_met : (id_ex_is_jal || id_ex_is_jalr);
+  wire ex_actual_taken = id_ex_is_branch ? branch_met_r : (id_ex_is_jal || id_ex_is_jalr);
 
-  wire [31:0] ex_actual_target = id_ex_is_branch ? ex_pc_plus_imm :
-                                 id_ex_is_jal    ? ex_pc_plus_imm :
-                                 (id_ex_is_jalr && jalr_phase) ? jalr_target :
-                                                   ex_pc_plus4;
+  // The ALU result is the branch/JAL/JALR target, load/store address, or
+  // arithmetic result depending on the instruction.
+  wire [31:0] ex_actual_target   = alu_res;
+  wire [31:0] ex_correct_next_pc = ex_actual_taken ? alu_res : ex_pc_plus4;
 
-  wire [31:0] ex_correct_next_pc = ex_actual_taken ? ex_actual_target : ex_pc_plus4;
-
-  wire ex_mispredict = !ex_jalr_stall && id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
+  wire ex_mispredict = !ex_alu_stall && id_ex_valid &&
+                       (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
                        ((ex_actual_taken != id_ex_pred_taken) ||
                         (ex_actual_taken && (ex_correct_next_pc != id_ex_pred_target)));
 
@@ -789,7 +791,7 @@ module cpu_top #(
   assign ex_redirect        = ex_redirect_r;
   assign ex_redirect_target = ex_redirect_target_r;
 
-  wire ex_redirect_now = !mem_stall && !ex_mdu_stall && !ex_jalr_stall && !ex_redirect_r && !fence_flush &&
+  wire ex_redirect_now = !mem_stall && !ex_mdu_stall && !ex_alu_stall && !ex_redirect_r && !fence_flush &&
                          id_ex_valid &&
                          (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
 
@@ -820,7 +822,7 @@ module cpu_top #(
   reg        bpu_train_mispred;
 
   wire bpu_capture = id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
-                     !mem_stall && !ex_mdu_stall && !ex_jalr_stall && !ex_redirect_r;
+                     !mem_stall && !ex_mdu_stall && !ex_alu_stall && !ex_redirect_r;
 
   always @(posedge clock) begin
     if (reset) begin
@@ -918,7 +920,7 @@ module cpu_top #(
       ex_mem_is_fence_i  <= 1'b0;
     end else if (mem_stall) begin
       // Hold the older memory instruction in MEM.
-    end else if (ex_redirect_r || ex_mdu_stall || ex_jalr_stall) begin
+    end else if (ex_redirect_r || ex_mdu_stall || ex_alu_stall) begin
       // Kill the younger instruction in EX; the redirecting instruction
       // already in EX/MEM advances to MEM/WB on this edge.
       ex_mem_valid       <= 1'b0;
@@ -939,7 +941,7 @@ module cpu_top #(
       ex_mem_rd          <= id_ex_valid ? id_ex_rd : 5'd0;
       ex_mem_alu_res     <= alu_res;
       ex_mem_val         <= id_ex_valid ? ex_val_next : 32'b0;
-      ex_mem_store_data  <= ex_src2;
+      ex_mem_store_data  <= store_data_r;
       ex_mem_next_pc     <= ex_correct_next_pc;
       ex_mem_funct3      <= id_ex_funct3;
       ex_mem_rf_wen      <= id_ex_valid ? id_ex_rf_wen : 1'b0;
