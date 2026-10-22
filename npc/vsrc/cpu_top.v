@@ -170,8 +170,8 @@ module cpu_top #(
   wire        id_pred_redirect;
   wire        fence_flush;
 
-  wire [31:0] fq_head_pc   = fq_pc[fq_head];
-  wire [31:0] fq_head_inst = fq_inst[fq_head];
+  reg  [31:0] fq_head_pc;
+  reg  [31:0] fq_head_inst;
 
   wire [1:0]  fetch_req_off   = fetch_req_pc[3:2];
   wire [31:0] fetch_word_base = {30'b0, fetch_req_off};
@@ -233,6 +233,26 @@ module cpu_top #(
       if (fq_push) fq_tail <= fq_tail + fetch_req_words;
       fq_count <= fq_count + (fq_push ? {1'b0, fetch_req_words} : 4'd0) -
                   (fq_pop ? 4'd1 : 4'd0);
+    end
+  end
+
+  // Registered FIFO head: the BPU and IF/ID read a flop instead of the 8:1
+  // array mux.
+  always @(posedge clock) begin
+    if (reset || icache_flush) begin
+      fq_head_pc   <= 32'b0;
+      fq_head_inst <= 32'h00000013;
+    end else if (fq_pop) begin
+      if (fq_count == 4'd1 && fq_push) begin
+        fq_head_pc   <= fetch_req_pc;
+        fq_head_inst <= icache_resp_line[32*fetch_req_off +: 32];
+      end else if (fq_count > 4'd1) begin
+        fq_head_pc   <= fq_pc[(fq_head + 3'd1) & 3'd7];
+        fq_head_inst <= fq_inst[(fq_head + 3'd1) & 3'd7];
+      end
+    end else if (fq_push && fq_count == 4'd0) begin
+      fq_head_pc   <= fetch_req_pc;
+      fq_head_inst <= icache_resp_line[32*fetch_req_off +: 32];
     end
   end
 
@@ -744,7 +764,10 @@ module cpu_top #(
   end
 
   // Branch Prediction Unit
-  bpu u_bpu (
+  bpu #(
+    .BTB_ENTRIES      (32),
+    .INDEX_WIDTH      (5)
+  ) u_bpu (
     .clock            (clock),
     .reset            (reset),
     .if_pc            (fq_head_pc),
