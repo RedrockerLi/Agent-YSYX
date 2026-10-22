@@ -34,14 +34,16 @@ module mul_unit #(
   localparam [31:0]   NITER_V = NITER;
   localparam [CW-1:0] LAST    = NITER_V[CW-1:0] - 1'b1;
 
-  localparam S_IDLE   = 3'd0;
-  localparam S_CONV   = 3'd5;
-  localparam S_MULT   = 3'd7;
-  localparam S_ITER   = 3'd1;
-  localparam S_FINAL  = 3'd2;
-  localparam S_NEG    = 3'd6;
-  localparam S_SELECT = 3'd3;
-  localparam S_DONE   = 3'd4;
+  localparam S_IDLE   = 4'd0;
+  localparam S_CONV   = 4'd5;
+  localparam S_MULT   = 4'd7;
+  localparam S_ITER   = 4'd1;
+  localparam S_FINAL  = 4'd2;
+  localparam S_FINAL_HI = 4'd8;
+  localparam S_NEG    = 4'd6;
+  localparam S_NEG_HI = 4'd9;
+  localparam S_SELECT = 4'd3;
+  localparam S_DONE   = 4'd4;
 
   // Operand signs.  Magnitudes are multiplied, then the 64-bit product is
   // negated for the signed variants.  MULHSU treats only src1 as signed.
@@ -54,7 +56,7 @@ module mul_unit #(
   wire [31:0] a_mag_c = (a_signed && src1[31]) ? (~src1 + 32'd1) : src1;
   wire [31:0] b_mag_c = (b_signed && src2[31]) ? (~src2 + 32'd1) : src2;
 
-  reg [2:0]    state;
+  reg [3:0]    state;
   reg [31:0]   a_raw, b_raw;
   reg [4:0]    op_r;
   reg [31:0]   a_mag_r, b_mag_r;
@@ -68,22 +70,46 @@ module mul_unit #(
   reg          done_r;
   reg [63:0]   prod_u;
   reg [63:0]   prod_r;
+  reg [31:0]   prod_lo;
+  reg          lo_cout_r;
+  reg [31:0]   neg_lo_r;
+  reg          neg_cout_r;
 
-  wire [63:0] prod_sum;
-  wire [63:0] prod_neg;
+  // The 64-bit product sum and sign negation are split into two 32-bit
+  // carry-select halves, one per cycle.
+  wire [31:0] sum_lo, sum_hi, neg_lo_sum, neg_hi_sum;
+  wire        sum_lo_cout, neg_lo_cout;
 
-  add64 u_prod_sum (
-    .a   (acc_sum[63:0]),
-    .b   (acc_carry[63:0]),
-    .cin (1'b0),
-    .sum (prod_sum)
+  adder32 u_sum_lo (
+    .a    (acc_sum[31:0]),
+    .b    (acc_carry[31:0]),
+    .cin  (1'b0),
+    .sum  (sum_lo),
+    .cout (sum_lo_cout)
   );
 
-  add64 u_prod_neg (
-    .a   (~prod_u),
-    .b   (64'd0),
-    .cin (1'b1),
-    .sum (prod_neg)
+  adder32 u_sum_hi (
+    .a    (acc_sum[63:32]),
+    .b    (acc_carry[63:32]),
+    .cin  (lo_cout_r),
+    .sum  (sum_hi),
+    .cout ()
+  );
+
+  adder32 u_neg_lo (
+    .a    (~prod_u[31:0]),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (neg_lo_sum),
+    .cout (neg_lo_cout)
+  );
+
+  adder32 u_neg_hi (
+    .a    (~prod_u[63:32]),
+    .b    (32'd0),
+    .cin  (neg_cout_r),
+    .sum  (neg_hi_sum),
+    .cout ()
   );
 
   assign done = done_r;
@@ -92,8 +118,27 @@ module mul_unit #(
   // forwarding mux and the 32-bit negate/add are not in the start-cycle path.
   wire a_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH) || (op_r == OP_MULHSU);
   wire b_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH);
-  wire [31:0] a_mag_s = (a_signed_r && a_raw[31]) ? (~a_raw + 32'd1) : a_raw;
-  wire [31:0] b_mag_s = (b_signed_r && b_raw[31]) ? (~b_raw + 32'd1) : b_raw;
+  wire [31:0] a_neg_sum, b_neg_sum;
+  wire        a_neg_cout, b_neg_cout;
+
+  adder32 u_a_neg (
+    .a    (~a_raw),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (a_neg_sum),
+    .cout (a_neg_cout)
+  );
+
+  adder32 u_b_neg (
+    .a    (~b_raw),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (b_neg_sum),
+    .cout (b_neg_cout)
+  );
+
+  wire [31:0] a_mag_s = (a_signed_r && a_raw[31]) ? a_neg_sum : a_raw;
+  wire [31:0] b_mag_s = (b_signed_r && b_raw[31]) ? b_neg_sum : b_raw;
 
   // Partial products for the current group of radix-4 digits.
   wire [1:0]  digit [0:DIGITS-1];
@@ -171,6 +216,10 @@ module mul_unit #(
       high_r    <= 1'b0;
       prod_u    <= 64'b0;
       prod_r    <= 64'b0;
+      prod_lo   <= 32'b0;
+      lo_cout_r <= 1'b0;
+      neg_lo_r  <= 32'b0;
+      neg_cout_r <= 1'b0;
     end else begin
       case (state)
         S_IDLE: begin
@@ -222,12 +271,24 @@ module mul_unit #(
         end
 
         S_FINAL: begin
-          prod_u <= prod_sum;
+          prod_lo   <= sum_lo;
+          lo_cout_r <= sum_lo_cout;
+          state     <= S_FINAL_HI;
+        end
+
+        S_FINAL_HI: begin
+          prod_u <= {sum_hi, prod_lo};
           state  <= S_NEG;
         end
 
         S_NEG: begin
-          prod_r <= neg_r ? prod_neg : prod_u;
+          neg_lo_r   <= neg_lo_sum;
+          neg_cout_r <= neg_lo_cout;
+          state      <= S_NEG_HI;
+        end
+
+        S_NEG_HI: begin
+          prod_r <= neg_r ? {neg_hi_sum, neg_lo_r} : prod_u;
           state  <= S_SELECT;
         end
 

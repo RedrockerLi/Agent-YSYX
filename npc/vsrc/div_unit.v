@@ -53,8 +53,27 @@ module div_unit #(
 
   assign done = done_r;
 
-  wire [31:0] a_mag_c = (is_signed_r && sign1_r) ? (~a_raw + 32'd1) : a_raw;
-  wire [31:0] b_mag_c = (is_signed_r && sign2_r) ? (~b_raw + 32'd1) : b_raw;
+  wire [31:0] a_mag_neg, b_mag_neg;
+  wire        a_mag_cout, b_mag_cout;
+
+  adder32 u_a_mag (
+    .a    (~a_raw),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (a_mag_neg),
+    .cout (a_mag_cout)
+  );
+
+  adder32 u_b_mag (
+    .a    (~b_raw),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (b_mag_neg),
+    .cout (b_mag_cout)
+  );
+
+  wire [31:0] a_mag_c = (is_signed_r && sign1_r) ? a_mag_neg : a_raw;
+  wire [31:0] b_mag_c = (is_signed_r && sign2_r) ? b_mag_neg : b_raw;
 
   localparam [31:0]   ITERS_V = ITERS;
   localparam [CW-1:0] LAST    = ITERS_V[CW-1:0] - 1'b1;
@@ -107,8 +126,28 @@ module div_unit #(
 
   wire q_sign = is_signed_r && (sign1_r ^ sign2_r);
   wire r_sign = is_signed_r && sign1_r;
-  wire [31:0] q_final = q_sign ? (~quot + 32'd1) : quot;
-  wire [31:0] r_final = r_sign ? (~rem[31:0] + 32'd1) : rem[31:0];
+
+  wire [31:0] q_neg, r_neg;
+  wire        q_neg_cout, r_neg_cout;
+
+  adder32 u_q_neg (
+    .a    (~quot),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (q_neg),
+    .cout (q_neg_cout)
+  );
+
+  adder32 u_r_neg (
+    .a    (~rem[31:0]),
+    .b    (32'd0),
+    .cin  (1'b1),
+    .sum  (r_neg),
+    .cout (r_neg_cout)
+  );
+
+  wire [31:0] q_final = q_sign ? q_neg : quot;
+  wire [31:0] r_final = r_sign ? r_neg : rem[31:0];
 
   always @(posedge clock) begin
     if (reset) begin

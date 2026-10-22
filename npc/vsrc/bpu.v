@@ -1,17 +1,33 @@
 `timescale 1ns / 1ps
 
+// Branch prediction unit with a two-stage lookup aligned to the fetch
+// request/response:
+//   stage 1 (request cycle): BTB tag/target + BHT read into flops
+//   stage 2 (response cycle): hit/taken/RAS selection
+// Four words of a fetched line are looked up together and stored in the
+// instruction queue, so the IF/ID capture never sees the BTB read path.
 module bpu #(
-  parameter BTB_ENTRIES = 64,
-  parameter INDEX_WIDTH = 6,  // 2^6 = 64
+  parameter BTB_ENTRIES = 32,
+  parameter INDEX_WIDTH = 5,  // 2^5 = 32
   parameter RAS_DEPTH   = 8
 )(
   input             clock,
   input             reset,
 
-  // Prediction Interface (IF Stage)
-  input      [31:0] if_pc,
-  output            pred_taken,
-  output     [31:0] pred_target,
+  // Pipelined lookup interface (four words per fetch request).
+  input             lookup_valid,
+  input      [31:0] lookup_pc0,
+  input      [31:0] lookup_pc1,
+  input      [31:0] lookup_pc2,
+  input      [31:0] lookup_pc3,
+  output            lookup_taken0,
+  output            lookup_taken1,
+  output            lookup_taken2,
+  output            lookup_taken3,
+  output     [31:0] lookup_target0,
+  output     [31:0] lookup_target1,
+  output     [31:0] lookup_target2,
+  output     [31:0] lookup_target3,
 
   // Training / Resolution Interface (EX Stage)
   input             train_valid,
@@ -36,33 +52,90 @@ module bpu #(
   reg                 btb_is_ret [BTB_ENTRIES-1:0];
 
   // 2. BHT: 2-bit Saturating Counters
-  // 2'b00: Strongly Not Taken, 2'b01: Weakly Not Taken, 2'b10: Weakly Taken, 2'b11: Strongly Taken
+  // 2'b00: Strongly Not Taken, 2'b01: Weakly Not Taken,
+  // 2'b10: Weakly Taken, 2'b11: Strongly Taken
   reg [1:0]           bht [BTB_ENTRIES-1:0];
 
   // 3. RAS: Return Address Stack
   reg [31:0]          ras_stack [RAS_DEPTH-1:0];
   reg [2:0]           ras_ptr;
 
-  // Lookup in IF stage
-  wire [INDEX_WIDTH-1:0] if_index = if_pc[INDEX_WIDTH+1 : 2];
-  wire [TAG_WIDTH-1:0]   if_tag   = if_pc[31 : INDEX_WIDTH+2];
+  // Stage 1: BTB/BHT read for four consecutive words.
+  wire [INDEX_WIDTH-1:0] idx0 = lookup_pc0[INDEX_WIDTH+1 : 2];
+  wire [INDEX_WIDTH-1:0] idx1 = lookup_pc1[INDEX_WIDTH+1 : 2];
+  wire [INDEX_WIDTH-1:0] idx2 = lookup_pc2[INDEX_WIDTH+1 : 2];
+  wire [INDEX_WIDTH-1:0] idx3 = lookup_pc3[INDEX_WIDTH+1 : 2];
 
-  wire btb_hit = btb_valid[if_index] && (btb_tag[if_index] == if_tag);
-  wire bht_taken = bht[if_index][1]; // bit 1 indicates taken
+  wire [TAG_WIDTH-1:0] tag0 = lookup_pc0[31 : INDEX_WIDTH+2];
+  wire [TAG_WIDTH-1:0] tag1 = lookup_pc1[31 : INDEX_WIDTH+2];
+  wire [TAG_WIDTH-1:0] tag2 = lookup_pc2[31 : INDEX_WIDTH+2];
+  wire [TAG_WIDTH-1:0] tag3 = lookup_pc3[31 : INDEX_WIDTH+2];
 
-  // RAS top-of-stack prediction
+  reg        s1_valid;
+  reg [31:0] s1_pc    [0:3];
+  reg        s1_hit   [0:3];
+  reg        s1_is_ret[0:3];
+  reg        s1_bht   [0:3];
+  reg [31:0] s1_target[0:3];
+
+  integer i;
+  always @(posedge clock) begin
+    if (reset) begin
+      s1_valid <= 1'b0;
+      for (i = 0; i < 4; i = i + 1) begin
+        s1_pc[i]     <= 32'b0;
+        s1_hit[i]    <= 1'b0;
+        s1_is_ret[i] <= 1'b0;
+        s1_bht[i]    <= 1'b0;
+        s1_target[i] <= 32'b0;
+      end
+    end else begin
+      s1_valid    <= lookup_valid;
+      s1_pc[0]    <= lookup_pc0;
+      s1_pc[1]    <= lookup_pc1;
+      s1_pc[2]    <= lookup_pc2;
+      s1_pc[3]    <= lookup_pc3;
+      s1_hit[0]   <= btb_valid[idx0] && (btb_tag[idx0] == tag0);
+      s1_hit[1]   <= btb_valid[idx1] && (btb_tag[idx1] == tag1);
+      s1_hit[2]   <= btb_valid[idx2] && (btb_tag[idx2] == tag2);
+      s1_hit[3]   <= btb_valid[idx3] && (btb_tag[idx3] == tag3);
+      s1_is_ret[0] <= btb_is_ret[idx0];
+      s1_is_ret[1] <= btb_is_ret[idx1];
+      s1_is_ret[2] <= btb_is_ret[idx2];
+      s1_is_ret[3] <= btb_is_ret[idx3];
+      s1_bht[0]   <= bht[idx0][1];
+      s1_bht[1]   <= bht[idx1][1];
+      s1_bht[2]   <= bht[idx2][1];
+      s1_bht[3]   <= bht[idx3][1];
+      s1_target[0] <= btb_target[idx0];
+      s1_target[1] <= btb_target[idx1];
+      s1_target[2] <= btb_target[idx2];
+      s1_target[3] <= btb_target[idx3];
+    end
+  end
+
+  // Stage 2: taken/target selection.  The RAS top is common to all words.
   wire [2:0]  ras_top_idx = (ras_ptr == 3'd0) ? 3'd7 : (ras_ptr - 3'd1);
   wire [31:0] ras_target  = ras_stack[ras_top_idx];
 
-  assign pred_taken  = btb_hit && (btb_is_ret[if_index] || bht_taken);
-  assign pred_target = (btb_hit && btb_is_ret[if_index] && (ras_ptr != 0)) ? ras_target :
-                       btb_hit ? btb_target[if_index] : (if_pc + 32'd4);
+  assign lookup_taken0 = s1_valid && s1_hit[0] && (s1_is_ret[0] || s1_bht[0]);
+  assign lookup_taken1 = s1_valid && s1_hit[1] && (s1_is_ret[1] || s1_bht[1]);
+  assign lookup_taken2 = s1_valid && s1_hit[2] && (s1_is_ret[2] || s1_bht[2]);
+  assign lookup_taken3 = s1_valid && s1_hit[3] && (s1_is_ret[3] || s1_bht[3]);
+
+  assign lookup_target0 = (s1_is_ret[0] && (ras_ptr != 3'd0)) ? ras_target :
+                          s1_hit[0] ? s1_target[0] : (s1_pc[0] + 32'd4);
+  assign lookup_target1 = (s1_is_ret[1] && (ras_ptr != 3'd0)) ? ras_target :
+                          s1_hit[1] ? s1_target[1] : (s1_pc[1] + 32'd4);
+  assign lookup_target2 = (s1_is_ret[2] && (ras_ptr != 3'd0)) ? ras_target :
+                          s1_hit[2] ? s1_target[2] : (s1_pc[2] + 32'd4);
+  assign lookup_target3 = (s1_is_ret[3] && (ras_ptr != 3'd0)) ? ras_target :
+                          s1_hit[3] ? s1_target[3] : (s1_pc[3] + 32'd4);
 
   // Training & State Updates
   wire [INDEX_WIDTH-1:0] train_index = train_pc[INDEX_WIDTH+1 : 2];
   wire [TAG_WIDTH-1:0]   train_tag   = train_pc[31 : INDEX_WIDTH+2];
 
-  integer i;
   always @(posedge clock) begin
     if (reset) begin
       ras_ptr          <= 3'd0;

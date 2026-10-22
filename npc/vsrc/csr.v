@@ -23,6 +23,26 @@ module csr (
   reg [31:0] mcause;
   reg [63:0] mcycle;
 
+  // 64-bit cycle counter built from two 32-bit carry-select adders.
+  wire [31:0] mcycle_lo_sum, mcycle_hi_sum;
+  wire        mcycle_lo_cout;
+
+  adder32 u_mcycle_lo (
+    .a    (mcycle[31:0]),
+    .b    (32'd1),
+    .cin  (1'b0),
+    .sum  (mcycle_lo_sum),
+    .cout (mcycle_lo_cout)
+  );
+
+  adder32 u_mcycle_hi (
+    .a    (mcycle[63:32]),
+    .b    (32'd0),
+    .cin  (mcycle_lo_cout),
+    .sum  (mcycle_hi_sum),
+    .cout ()
+  );
+
   assign mtvec_out = mtvec;
   assign mepc_out  = mepc;
 
@@ -62,7 +82,7 @@ module csr (
       mcause  <= 32'b0;
       mcycle  <= 64'b0;
     end else begin
-      mcycle <= mcycle + 64'd1;
+      mcycle <= {mcycle_hi_sum, mcycle_lo_sum};
 
       if (is_ecall) begin
         mepc    <= pc;

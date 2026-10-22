@@ -160,11 +160,11 @@ module cpu_top #(
   reg  [3:0]  fq_count;
   reg  [2:0]  fq_head;
   reg  [2:0]  fq_tail;
-  reg  [31:0] fq_pc   [0:7];
-  reg  [31:0] fq_inst [0:7];
+  reg  [31:0] fq_pc    [0:7];
+  reg  [31:0] fq_inst  [0:7];
+  reg         fq_ptaken [0:7];
+  reg  [31:0] fq_ptarget[0:7];
 
-  wire [31:0] bpu_pred_target;
-  wire        bpu_pred_taken;
   wire [31:0] bpu_total_pred_cnt;
   wire [31:0] bpu_correct_pred_cnt;
   wire        id_pred_redirect;
@@ -172,6 +172,22 @@ module cpu_top #(
 
   reg  [31:0] fq_head_pc;
   reg  [31:0] fq_head_inst;
+  reg         fq_head_ptaken;
+  reg  [31:0] fq_head_ptarget;
+
+  wire        bpu_lt0, bpu_lt1, bpu_lt2, bpu_lt3;
+  wire [31:0] bpu_lp0, bpu_lp1, bpu_lp2, bpu_lp3;
+
+  reg         fetch_start_r;
+  reg  [3:0]  fetch_pred_taken;
+  reg  [31:0] fetch_pred_target [0:3];
+
+  wire [3:0]  push_ptaken = fetch_start_r ?
+                            {bpu_lt3, bpu_lt2, bpu_lt1, bpu_lt0} : fetch_pred_taken;
+  wire [31:0] push_ptarget0 = fetch_start_r ? bpu_lp0 : fetch_pred_target[0];
+  wire [31:0] push_ptarget1 = fetch_start_r ? bpu_lp1 : fetch_pred_target[1];
+  wire [31:0] push_ptarget2 = fetch_start_r ? bpu_lp2 : fetch_pred_target[2];
+  wire [31:0] push_ptarget3 = fetch_start_r ? bpu_lp3 : fetch_pred_target[3];
 
   wire [1:0]  fetch_req_off   = fetch_req_pc[3:2];
   wire [31:0] fetch_word_base = {30'b0, fetch_req_off};
@@ -226,6 +242,11 @@ module cpu_top #(
             fq_pc[(fq_tail + fqi[2:0]) & 3'd7]   <= fetch_req_pc + (fqi << 2);
             fq_inst[(fq_tail + fqi[2:0]) & 3'd7] <=
                 icache_resp_line[32*((fetch_word_base + fqi) & 32'd3) +: 32];
+            fq_ptaken[(fq_tail + fqi[2:0]) & 3'd7]  <= push_ptaken[fqi[1:0]];
+            fq_ptarget[(fq_tail + fqi[2:0]) & 3'd7] <=
+                (fqi == 0) ? push_ptarget0 :
+                (fqi == 1) ? push_ptarget1 :
+                (fqi == 2) ? push_ptarget2 : push_ptarget3;
           end
         end
       end
@@ -240,19 +261,50 @@ module cpu_top #(
   // array mux.
   always @(posedge clock) begin
     if (reset || icache_flush) begin
-      fq_head_pc   <= 32'b0;
-      fq_head_inst <= 32'h00000013;
+      fq_head_pc     <= 32'b0;
+      fq_head_inst   <= 32'h00000013;
+      fq_head_ptaken <= 1'b0;
+      fq_head_ptarget <= 32'b0;
     end else if (fq_pop) begin
       if (fq_count == 4'd1 && fq_push) begin
-        fq_head_pc   <= fetch_req_pc;
-        fq_head_inst <= icache_resp_line[32*fetch_req_off +: 32];
+        fq_head_pc     <= fetch_req_pc;
+        fq_head_inst   <= icache_resp_line[32*fetch_req_off +: 32];
+        fq_head_ptaken <= push_ptaken[0];
+        fq_head_ptarget <= push_ptarget0;
       end else if (fq_count > 4'd1) begin
-        fq_head_pc   <= fq_pc[(fq_head + 3'd1) & 3'd7];
-        fq_head_inst <= fq_inst[(fq_head + 3'd1) & 3'd7];
+        fq_head_pc     <= fq_pc[(fq_head + 3'd1) & 3'd7];
+        fq_head_inst   <= fq_inst[(fq_head + 3'd1) & 3'd7];
+        fq_head_ptaken <= fq_ptaken[(fq_head + 3'd1) & 3'd7];
+        fq_head_ptarget <= fq_ptarget[(fq_head + 3'd1) & 3'd7];
       end
     end else if (fq_push && fq_count == 4'd0) begin
-      fq_head_pc   <= fetch_req_pc;
-      fq_head_inst <= icache_resp_line[32*fetch_req_off +: 32];
+      fq_head_pc     <= fetch_req_pc;
+      fq_head_inst   <= icache_resp_line[32*fetch_req_off +: 32];
+      fq_head_ptaken <= push_ptaken[0];
+      fq_head_ptarget <= push_ptarget0;
+    end
+  end
+
+  // Capture the four BPU predictions when the request's stage-2 lookup is
+  // valid.  A refill may return later, so the predictions are held until the
+  // line is actually pushed.
+  always @(posedge clock) begin
+    if (reset) begin
+      fetch_start_r    <= 1'b0;
+      fetch_pred_taken <= 4'b0;
+      fetch_pred_target[0] <= 32'b0;
+      fetch_pred_target[1] <= 32'b0;
+      fetch_pred_target[2] <= 32'b0;
+      fetch_pred_target[3] <= 32'b0;
+    end else begin
+      fetch_start_r <= fetch_start;
+      if (fetch_start_r) begin
+        fetch_pred_taken  <= {bpu_lt3, bpu_lt2, bpu_lt1, bpu_lt0};
+        fetch_pred_target[0] <= bpu_lp0;
+        fetch_pred_target[1] <= bpu_lp1;
+        fetch_pred_target[2] <= bpu_lp2;
+        fetch_pred_target[3] <= bpu_lp3;
+      end
     end
   end
 
@@ -277,8 +329,8 @@ module cpu_top #(
         if_id_valid       <= 1'b1;
         if_id_pc          <= fq_head_pc;
         if_id_inst        <= fq_head_inst;
-        if_id_pred_taken  <= bpu_pred_taken;
-        if_id_pred_target <= bpu_pred_target;
+        if_id_pred_taken  <= fq_head_ptaken;
+        if_id_pred_target <= fq_head_ptarget;
       end else begin
         if_id_valid       <= 1'b0;
         if_id_pc          <= 32'b0;
@@ -579,6 +631,26 @@ module cpu_top #(
   wire [31:0] alu_in1 = id_ex_is_auipc ? id_ex_pc : ex_src1;
   wire [31:0] alu_in2 = (id_ex_is_alu_i || id_ex_is_load || id_ex_is_store || id_ex_is_auipc) ? id_ex_imm : ex_src2;
 
+  // PC-relative targets use the carry-select adder, not the generic +.
+  wire [31:0] ex_pc_plus_imm, ex_pc_plus4;
+  wire        ex_pcimm_cout, ex_pc4_cout;
+
+  adder32 u_ex_pcimm (
+    .a    (id_ex_pc),
+    .b    (id_ex_imm),
+    .cin  (1'b0),
+    .sum  (ex_pc_plus_imm),
+    .cout (ex_pcimm_cout)
+  );
+
+  adder32 u_ex_pc4 (
+    .a    (id_ex_pc),
+    .b    (32'd4),
+    .cin  (1'b0),
+    .sum  (ex_pc_plus4),
+    .cout (ex_pc4_cout)
+  );
+
   wire [31:0] alu_res;
   alu u_alu (
     .alu_op (id_ex_alu_op),
@@ -649,7 +721,16 @@ module cpu_top #(
   reg [31:0] jalr_src1_r;
   reg [31:0] jalr_imm_r;
   assign ex_jalr_stall = id_ex_valid && id_ex_is_jalr && !jalr_phase && !ex_redirect;
-  wire [31:0] jalr_target  = (jalr_src1_r + jalr_imm_r) & ~32'h1;
+  wire [31:0] ex_jalr_sum;
+  wire        ex_jalr_cout;
+  adder32 u_ex_jalr (
+    .a    (jalr_src1_r),
+    .b    (jalr_imm_r),
+    .cin  (1'b0),
+    .sum  (ex_jalr_sum),
+    .cout (ex_jalr_cout)
+  );
+  wire [31:0] jalr_target = ex_jalr_sum & ~32'h1;
 
   always @(posedge clock) begin
     if (reset) begin
@@ -669,12 +750,12 @@ module cpu_top #(
 
   wire ex_actual_taken = id_ex_is_branch ? branch_cond_met : (id_ex_is_jal || id_ex_is_jalr);
 
-  wire [31:0] ex_actual_target = id_ex_is_branch ? (id_ex_pc + id_ex_imm) :
-                                 id_ex_is_jal    ? (id_ex_pc + id_ex_imm) :
+  wire [31:0] ex_actual_target = id_ex_is_branch ? ex_pc_plus_imm :
+                                 id_ex_is_jal    ? ex_pc_plus_imm :
                                  (id_ex_is_jalr && jalr_phase) ? jalr_target :
-                                                   (id_ex_pc + 32'd4);
+                                                   ex_pc_plus4;
 
-  wire [31:0] ex_correct_next_pc = ex_actual_taken ? ex_actual_target : (id_ex_pc + 32'd4);
+  wire [31:0] ex_correct_next_pc = ex_actual_taken ? ex_actual_target : ex_pc_plus4;
 
   wire ex_mispredict = !ex_jalr_stall && id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
                        ((ex_actual_taken != id_ex_pred_taken) ||
@@ -714,7 +795,7 @@ module cpu_top #(
 
   wire [31:0] ex_redirect_target_now = id_ex_is_ecall   ? mtvec :
                                        id_ex_is_mret    ? mepc :
-                                       id_ex_is_fence_i ? (id_ex_pc + 32'd4) :
+                                       id_ex_is_fence_i ? ex_pc_plus4 :
                                                           ex_correct_next_pc;
 
   always @(posedge clock) begin
@@ -770,9 +851,19 @@ module cpu_top #(
   ) u_bpu (
     .clock            (clock),
     .reset            (reset),
-    .if_pc            (fq_head_pc),
-    .pred_taken       (bpu_pred_taken),
-    .pred_target      (bpu_pred_target),
+    .lookup_valid     (fetch_start),
+    .lookup_pc0       (fetch_pc),
+    .lookup_pc1       (fetch_pc + 32'd4),
+    .lookup_pc2       (fetch_pc + 32'd8),
+    .lookup_pc3       (fetch_pc + 32'd12),
+    .lookup_taken0    (bpu_lt0),
+    .lookup_taken1    (bpu_lt1),
+    .lookup_taken2    (bpu_lt2),
+    .lookup_taken3    (bpu_lt3),
+    .lookup_target0   (bpu_lp0),
+    .lookup_target1   (bpu_lp1),
+    .lookup_target2   (bpu_lp2),
+    .lookup_target3   (bpu_lp3),
     .train_valid      (bpu_train_valid),
     .train_pc         (bpu_train_pc),
     .train_taken      (bpu_train_taken),
@@ -804,7 +895,7 @@ module cpu_top #(
   // forwarding path starts from a flop instead of a combinational mux.
   wire [31:0] ex_val_next = id_ex_is_csr ? csr_rdata :
                             id_ex_is_lui ? id_ex_imm :
-                            (id_ex_is_jal || id_ex_is_jalr) ? (id_ex_pc + 32'd4) :
+                            (id_ex_is_jal || id_ex_is_jalr) ? ex_pc_plus4 :
                             id_ex_is_div ? div_res :
                             id_ex_is_mul ? mul_res :
                             alu_res;
