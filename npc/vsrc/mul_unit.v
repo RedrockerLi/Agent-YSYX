@@ -66,8 +66,25 @@ module mul_unit #(
   reg [CW-1:0] iter;
   reg          neg_r, high_r;
   reg          done_r;
-  reg [AW-1:0] prod_u;
-  reg [AW-1:0] prod_r;
+  reg [63:0]   prod_u;
+  reg [63:0]   prod_r;
+
+  wire [63:0] prod_sum;
+  wire [63:0] prod_neg;
+
+  add64 u_prod_sum (
+    .a   (acc_sum[63:0]),
+    .b   (acc_carry[63:0]),
+    .cin (1'b0),
+    .sum (prod_sum)
+  );
+
+  add64 u_prod_neg (
+    .a   (~prod_u),
+    .b   (64'd0),
+    .cin (1'b1),
+    .sum (prod_neg)
+  );
 
   assign done = done_r;
 
@@ -152,8 +169,8 @@ module mul_unit #(
       iter      <= {CW{1'b0}};
       neg_r     <= 1'b0;
       high_r    <= 1'b0;
-      prod_u    <= {AW{1'b0}};
-      prod_r    <= {AW{1'b0}};
+      prod_u    <= 64'b0;
+      prod_r    <= 64'b0;
     end else begin
       case (state)
         S_IDLE: begin
@@ -205,12 +222,12 @@ module mul_unit #(
         end
 
         S_FINAL: begin
-          prod_u <= acc_sum + acc_carry;
+          prod_u <= prod_sum;
           state  <= S_NEG;
         end
 
         S_NEG: begin
-          prod_r <= neg_r ? (~prod_u + {{(AW-1){1'b0}}, 1'b1}) : prod_u;
+          prod_r <= neg_r ? prod_neg : prod_u;
           state  <= S_SELECT;
         end
 

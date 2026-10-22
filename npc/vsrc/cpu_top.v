@@ -784,31 +784,6 @@ module cpu_top #(
     .correct_pred_cnt (bpu_correct_pred_cnt)
   );
 
-  // Store data preparation
-  wire [1:0]  ex_byte_offset = alu_res[1:0];
-  reg  [31:0] ex_mem_wdata;
-  reg  [3:0]  ex_mem_wmask;
-  always @(*) begin
-    case (id_ex_funct3)
-      3'b000: begin // SB
-        ex_mem_wdata = ex_src2 << (8 * ex_byte_offset);
-        ex_mem_wmask = 4'b0001 << ex_byte_offset;
-      end
-      3'b001: begin // SH
-        ex_mem_wdata = ex_src2 << (16 * ex_byte_offset[1]);
-        ex_mem_wmask = 4'b0011 << (2 * ex_byte_offset[1]);
-      end
-      3'b010: begin // SW
-        ex_mem_wdata = ex_src2;
-        ex_mem_wmask = 4'b1111;
-      end
-      default: begin
-        ex_mem_wdata = ex_src2;
-        ex_mem_wmask = 4'b0000;
-      end
-    endcase
-  end
-
   // =========================================================================
   // Pipeline Register: EX / MEM
   // =========================================================================
@@ -816,7 +791,6 @@ module cpu_top #(
   reg [31:0] ex_mem_inst;
   reg [31:0] ex_mem_alu_res;
   reg [31:0] ex_mem_store_data;
-  reg [3:0]  ex_mem_store_mask;
   reg [31:0] ex_mem_next_pc;
   reg [2:0]  ex_mem_funct3;
   reg        ex_mem_is_load;
@@ -844,7 +818,6 @@ module cpu_top #(
       ex_mem_alu_res     <= 32'b0;
       ex_mem_val         <= 32'b0;
       ex_mem_store_data  <= 32'b0;
-      ex_mem_store_mask  <= 4'b0;
       ex_mem_next_pc     <= 32'b0;
       ex_mem_funct3      <= 3'b0;
       ex_mem_rf_wen      <= 1'b0;
@@ -862,7 +835,6 @@ module cpu_top #(
       ex_mem_alu_res     <= 32'b0;
       ex_mem_val         <= 32'b0;
       ex_mem_store_data  <= 32'b0;
-      ex_mem_store_mask  <= 4'b0;
       ex_mem_funct3      <= 3'b0;
       ex_mem_rf_wen      <= 1'b0;
       ex_mem_is_load     <= 1'b0;
@@ -876,8 +848,7 @@ module cpu_top #(
       ex_mem_rd          <= id_ex_valid ? id_ex_rd : 5'd0;
       ex_mem_alu_res     <= alu_res;
       ex_mem_val         <= id_ex_valid ? ex_val_next : 32'b0;
-      ex_mem_store_data  <= ex_mem_wdata;
-      ex_mem_store_mask  <= ex_mem_wmask;
+      ex_mem_store_data  <= ex_src2;
       ex_mem_next_pc     <= ex_correct_next_pc;
       ex_mem_funct3      <= id_ex_funct3;
       ex_mem_rf_wen      <= id_ex_valid ? id_ex_rf_wen : 1'b0;
@@ -899,6 +870,30 @@ module cpu_top #(
   wire [1:0]  mem_byte_offset = ex_mem_alu_res[1:0];
   wire [31:0] mem_rdata_raw   = dcache_resp_rdata;
   reg  [31:0] mem_rdata;
+
+  // Store data formatting runs in MEM, off the EX forwarding/shift path.
+  reg  [31:0] mem_store_data;
+  reg  [3:0]  mem_store_mask;
+  always @(*) begin
+    case (ex_mem_funct3)
+      3'b000: begin // SB
+        mem_store_data = ex_mem_store_data << (8 * mem_byte_offset);
+        mem_store_mask = 4'b0001 << mem_byte_offset;
+      end
+      3'b001: begin // SH
+        mem_store_data = ex_mem_store_data << (16 * mem_byte_offset[1]);
+        mem_store_mask = 4'b0011 << (2 * mem_byte_offset[1]);
+      end
+      3'b010: begin // SW
+        mem_store_data = ex_mem_store_data;
+        mem_store_mask = 4'b1111;
+      end
+      default: begin
+        mem_store_data = ex_mem_store_data;
+        mem_store_mask = 4'b0000;
+      end
+    endcase
+  end
 
   always @(*) begin
     case (ex_mem_funct3)
@@ -1129,8 +1124,8 @@ module cpu_top #(
     .req_valid      (dcache_req_valid),
     .req_write      (ex_mem_is_store),
     .req_addr       (ex_mem_alu_res),
-    .req_wdata      (ex_mem_store_data),
-    .req_wmask      (ex_mem_store_mask),
+    .req_wdata      (mem_store_data),
+    .req_wmask      (mem_store_mask),
     .req_ready      (dcache_req_ready),
     .resp_valid     (dcache_resp_valid),
     .resp_rdata     (dcache_resp_rdata),
