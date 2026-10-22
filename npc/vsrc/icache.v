@@ -79,9 +79,11 @@ module icache #(
   wire [127:0] line1_w = way1_data[index_w];
 
   wire [2:0] words_served = 3'd4 - {1'b0, word_sel_w};
+  wire [2:0] words_saved  = 3'd4 - {1'b0, saved_word_sel};
 
   assign req_ready  = (state == S_IDLE) && !flush && !fence_i;
-  assign resp_valid = ((state == S_RESP) || (state == S_REFILL_DONE)) && !flush && !fence_i;
+  assign resp_valid = ((state == S_RESP && (hit0_r || hit1_r)) ||
+                       (state == S_REFILL_DONE)) && !flush && !fence_i;
   assign resp_line  = (state == S_RESP) ? (hit0_r ? line0_r : line1_r) : refill_buf;
   assign resp_word_sel = saved_word_sel;
 
@@ -138,25 +140,26 @@ module icache #(
             line1_r        <= line1_w;
             hit0_r         <= hit0_w;
             hit1_r         <= hit1_w;
-
-            if (hit0_w || hit1_w) begin
-              hit_count  <= hit_count + {29'b0, words_served};
-              lru[index_w] <= hit0_w ? 1'b1 : 1'b0;
-              state      <= S_RESP;
-            end else begin
-              miss_count    <= miss_count + {29'b0, words_served};
-              victim_way    <= lru[index_w];
-              mem_req_valid <= 1'b1;
-              mem_req_addr  <= {req_addr[31:4], 4'b0000};
-              mem_req_len   <= 8'd3;
-              refill_beat   <= 2'b00;
-              state         <= S_REFILL;
-            end
+            state          <= S_RESP;
           end
         end
 
         S_RESP: begin
-          state <= S_IDLE;
+          // The hit decision, LRU update and refill start use the registers
+          // captured at the request edge, not the array mux output.
+          if (hit0_r || hit1_r) begin
+            hit_count       <= hit_count + {29'b0, words_saved};
+            lru[saved_index] <= hit0_r ? 1'b1 : 1'b0;
+            state           <= S_IDLE;
+          end else begin
+            miss_count    <= miss_count + {29'b0, words_saved};
+            victim_way    <= lru[saved_index];
+            mem_req_valid <= 1'b1;
+            mem_req_addr  <= {saved_addr[31:4], 4'b0000};
+            mem_req_len   <= 8'd3;
+            refill_beat   <= 2'b00;
+            state         <= S_REFILL;
+          end
         end
 
         S_REFILL: begin
