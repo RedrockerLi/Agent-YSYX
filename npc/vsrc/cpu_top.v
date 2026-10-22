@@ -169,6 +169,9 @@ module cpu_top #(
   wire        id_pred_redirect;
   wire        fence_flush;
 
+  wire [31:0] fq_head_pc   = fq_pc[fq_head];
+  wire [31:0] fq_head_inst = fq_inst[fq_head];
+
   wire [1:0]  fetch_req_off   = fetch_req_pc[3:2];
   wire [31:0] fetch_word_base = {30'b0, fetch_req_off};
   wire [2:0]  fetch_req_words = 3'd4 - {1'b0, fetch_req_off};
@@ -194,7 +197,7 @@ module cpu_top #(
       fetch_pc      <= ex_redirect_target;
       fetch_pending <= 1'b0;
     end else if (id_pred_redirect) begin
-      fetch_pc      <= bpu_pred_target;
+      fetch_pc      <= if_id_pred_target;
       fetch_pending <= 1'b0;
     end else if (fetch_start) begin
       fetch_req_pc  <= fetch_pc;
@@ -238,21 +241,29 @@ module cpu_top #(
   reg        if_id_valid;
   reg [31:0] if_id_pc;
   reg [31:0] if_id_inst;
+  reg        if_id_pred_taken;
+  reg [31:0] if_id_pred_target;
 
   always @(posedge clock) begin
     if (reset || icache_flush) begin
-      if_id_valid <= 1'b0;
-      if_id_pc    <= 32'b0;
-      if_id_inst  <= 32'h00000013; // NOP
+      if_id_valid       <= 1'b0;
+      if_id_pc          <= 32'b0;
+      if_id_inst        <= 32'h00000013; // NOP
+      if_id_pred_taken  <= 1'b0;
+      if_id_pred_target <= 32'b0;
     end else if (!id_stall) begin
       if (fq_count != 4'd0) begin
-        if_id_valid <= 1'b1;
-        if_id_pc    <= fq_pc[fq_head];
-        if_id_inst  <= fq_inst[fq_head];
+        if_id_valid       <= 1'b1;
+        if_id_pc          <= fq_head_pc;
+        if_id_inst        <= fq_head_inst;
+        if_id_pred_taken  <= bpu_pred_taken;
+        if_id_pred_target <= bpu_pred_target;
       end else begin
-        if_id_valid <= 1'b0;
-        if_id_pc    <= 32'b0;
-        if_id_inst  <= 32'h00000013; // NOP
+        if_id_valid       <= 1'b0;
+        if_id_pc          <= 32'b0;
+        if_id_inst        <= 32'h00000013; // NOP
+        if_id_pred_taken  <= 1'b0;
+        if_id_pred_target <= 32'b0;
       end
     end
   end
@@ -283,11 +294,11 @@ module cpu_top #(
   wire id_is_jalr    = (id_opcode == 7'b1100111 && id_funct3 == 3'b000);
   wire id_is_branch  = (id_opcode == 7'b1100011);
 
-  // The BPU is looked up with the decoded PC; a predicted-taken control
-  // instruction redirects the fetch unit at the end of ID.
+  // The BPU lookup result is captured with the instruction into IF/ID, so the
+  // ID-stage redirect uses a flop instead of the BTB read path.
   assign id_pred_redirect = if_id_valid && !id_stall && !ex_redirect && !fence_flush &&
                             (id_is_branch || id_is_jal || id_is_jalr) &&
-                            bpu_pred_taken;
+                            if_id_pred_taken;
   wire id_is_load    = (id_opcode == 7'b0000011);
   wire id_is_store   = (id_opcode == 7'b0100011);
   wire id_is_alu_i   = (id_opcode == 7'b0010011);
@@ -507,8 +518,8 @@ module cpu_top #(
       id_ex_is_fence_i  <= if_id_valid ? id_is_fence_i : 1'b0;
       id_ex_is_div      <= if_id_valid ? id_is_div : 1'b0;
       id_ex_is_mul      <= if_id_valid ? id_is_mul : 1'b0;
-      id_ex_pred_taken  <= bpu_pred_taken;
-      id_ex_pred_target <= bpu_pred_target;
+      id_ex_pred_taken  <= if_id_pred_taken;
+      id_ex_pred_target <= if_id_pred_target;
     end
   end
 
@@ -688,7 +699,7 @@ module cpu_top #(
   bpu u_bpu (
     .clock            (clock),
     .reset            (reset),
-    .if_pc            (if_id_pc),
+    .if_pc            (fq_head_pc),
     .pred_taken       (bpu_pred_taken),
     .pred_target      (bpu_pred_target),
     .train_valid      (bpu_train_valid),

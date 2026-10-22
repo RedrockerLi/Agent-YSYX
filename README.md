@@ -42,9 +42,9 @@ docker run --rm -it --net=host -v "$PWD":/workspace ysyx
 
 ## 🔁 Iteration Path
 
-Iterations alternate between one architecture optimization round and one frequency improvement round. The boundary is defined by what a change alters, not by its size.
+Iterations alternate between architecture optimization and frequency improvement. The boundary is defined by what a change alters, not by its size.
 
-- **Architecture optimization round** — changes the processor's organization or features: pipeline depth and organization, forwarding and hazard handling, cache hierarchy and replacement policy, branch-prediction structure, bus/interconnect, and ISA or privilege support. The goal is higher IPC/CPI, fewer cycles, or better area and power at the same clock constraint; the round may not buy gains by relaxing functional correctness or timing constraints.
-- **Frequency improvement round** — keeps the architecture and ISA-visible behavior unchanged and only changes the timing implementation: retiming, register duplication, logic restructuring, fanout and logic-depth reduction, and replacing a long combinational operator with a multi-cycle implementation attached to the pipeline stall mechanism. The goal is a shorter critical path and a higher achievable clock; area and power deltas must be reported.
+- **Architecture optimization** — changes the processor's organization or features: pipeline depth and organization, forwarding and hazard handling, cache hierarchy and replacement policy, branch-prediction structure, bus/interconnect, and ISA or privilege support. The goal is higher IPC/CPI, fewer cycles, or better area and power at the same clock constraint; it may not buy gains by relaxing functional correctness or timing constraints.
+- **Frequency improvement** — keeps the architecture and ISA-visible behavior unchanged and only changes the timing implementation: retiming, register duplication, logic restructuring, fanout and logic-depth reduction, and replacing a long combinational operator with a multi-cycle implementation attached to the pipeline stall mechanism. The goal is a shorter critical path and a higher achievable clock; area and power deltas must be reported.
 
 Architecture rounds are compared at the same clock constraint using IPC and area/power; frequency rounds raise the target clock and are judged by post-synthesis/post-route timing together with benchmark cycle counts.

@@ -38,6 +38,7 @@ module mul_unit #(
   localparam S_CONV   = 3'd5;
   localparam S_ITER   = 3'd1;
   localparam S_FINAL  = 3'd2;
+  localparam S_NEG    = 3'd6;
   localparam S_SELECT = 3'd3;
   localparam S_DONE   = 3'd4;
 
@@ -63,6 +64,7 @@ module mul_unit #(
   reg [CW-1:0] iter;
   reg          neg_r, high_r;
   reg          done_r;
+  reg [AW-1:0] prod_u;
   reg [AW-1:0] prod_r;
 
   assign done = done_r;
@@ -146,6 +148,7 @@ module mul_unit #(
       iter      <= {CW{1'b0}};
       neg_r     <= 1'b0;
       high_r    <= 1'b0;
+      prod_u    <= {AW{1'b0}};
       prod_r    <= {AW{1'b0}};
     end else begin
       case (state)
@@ -190,10 +193,12 @@ module mul_unit #(
         end
 
         S_FINAL: begin
-          // ~sum + ~carry + 2 == -(sum + carry) in two's complement.
-          prod_r <= (neg_r ? ~acc_sum : acc_sum) +
-                    (neg_r ? ~acc_carry : acc_carry) +
-                    {{(AW-2){1'b0}}, neg_r, 1'b0};
+          prod_u <= acc_sum + acc_carry;
+          state  <= S_NEG;
+        end
+
+        S_NEG: begin
+          prod_r <= neg_r ? (~prod_u + {{(AW-1){1'b0}}, 1'b1}) : prod_u;
           state  <= S_SELECT;
         end
 
