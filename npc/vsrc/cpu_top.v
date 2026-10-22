@@ -126,6 +126,7 @@ module cpu_top #(
   wire        div_start;
   wire        div_accept;
   wire        ex_mdu_stall;
+  wire        ex_jalr_stall;
   wire [31:0] div_res;
 
   wire        mul_busy;
@@ -409,7 +410,7 @@ module cpu_top #(
                          ((id_rs1_used && (id_ex_rd == id_rs1)) ||
                           (id_rs2_used && (id_ex_rd == id_rs2)));
 
-  assign id_stall = load_use_hazard || mem_stall || ex_mdu_stall;
+  assign id_stall = load_use_hazard || mem_stall || ex_mdu_stall || ex_jalr_stall;
 
   // =========================================================================
   // Pipeline Register: ID / EX
@@ -485,7 +486,7 @@ module cpu_top #(
         if (wb_rd == id_ex_rs1) id_ex_rs1_data <= wb_wdata;
         if (wb_rd == id_ex_rs2) id_ex_rs2_data <= wb_wdata;
       end
-    end else if (ex_mdu_stall) begin
+    end else if (ex_mdu_stall || ex_jalr_stall) begin
       // Hold the MDU instruction in EX; its operands were latched by the unit.
     end else begin
       id_ex_valid       <= if_id_valid;
@@ -622,16 +623,40 @@ module cpu_top #(
     endcase
   end
 
+  // JALR target: the forwarded src1 is captured in the first EX cycle, and
+  // the target adder runs from those flops in the second EX cycle.
+  reg        jalr_phase;
+  reg [31:0] jalr_src1_r;
+  reg [31:0] jalr_imm_r;
+  assign ex_jalr_stall = id_ex_valid && id_ex_is_jalr && !jalr_phase && !ex_redirect;
+  wire [31:0] jalr_target  = (jalr_src1_r + jalr_imm_r) & ~32'h1;
+
+  always @(posedge clock) begin
+    if (reset) begin
+      jalr_phase  <= 1'b0;
+      jalr_src1_r <= 32'b0;
+      jalr_imm_r  <= 32'b0;
+    end else if (!mem_stall && !ex_mdu_stall) begin
+      if (id_ex_valid && id_ex_is_jalr && !jalr_phase && !ex_redirect) begin
+        jalr_src1_r <= ex_src1;
+        jalr_imm_r  <= id_ex_imm;
+        jalr_phase  <= 1'b1;
+      end else begin
+        jalr_phase  <= 1'b0;
+      end
+    end
+  end
+
   wire ex_actual_taken = id_ex_is_branch ? branch_cond_met : (id_ex_is_jal || id_ex_is_jalr);
 
   wire [31:0] ex_actual_target = id_ex_is_branch ? (id_ex_pc + id_ex_imm) :
                                  id_ex_is_jal    ? (id_ex_pc + id_ex_imm) :
-                                 id_ex_is_jalr   ? ((ex_src1 + id_ex_imm) & ~32'h1) :
+                                 (id_ex_is_jalr && jalr_phase) ? jalr_target :
                                                    (id_ex_pc + 32'd4);
 
   wire [31:0] ex_correct_next_pc = ex_actual_taken ? ex_actual_target : (id_ex_pc + 32'd4);
 
-  wire ex_mispredict = id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
+  wire ex_mispredict = !ex_jalr_stall && id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
                        ((ex_actual_taken != id_ex_pred_taken) ||
                         (ex_actual_taken && (ex_correct_next_pc != id_ex_pred_target)));
 
@@ -663,7 +688,7 @@ module cpu_top #(
   assign ex_redirect        = ex_redirect_r;
   assign ex_redirect_target = ex_redirect_target_r;
 
-  wire ex_redirect_now = !mem_stall && !ex_mdu_stall && !ex_redirect_r && !fence_flush &&
+  wire ex_redirect_now = !mem_stall && !ex_mdu_stall && !ex_jalr_stall && !ex_redirect_r && !fence_flush &&
                          id_ex_valid &&
                          (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
 
@@ -694,7 +719,7 @@ module cpu_top #(
   reg        bpu_train_mispred;
 
   wire bpu_capture = id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
-                     !mem_stall && !ex_mdu_stall && !ex_redirect_r;
+                     !mem_stall && !ex_mdu_stall && !ex_jalr_stall && !ex_redirect_r;
 
   always @(posedge clock) begin
     if (reset) begin
@@ -806,7 +831,7 @@ module cpu_top #(
       ex_mem_is_fence_i  <= 1'b0;
     end else if (mem_stall) begin
       // Hold the older memory instruction in MEM.
-    end else if (ex_redirect_r || ex_mdu_stall) begin
+    end else if (ex_redirect_r || ex_mdu_stall || ex_jalr_stall) begin
       // Kill the younger instruction in EX; the redirecting instruction
       // already in EX/MEM advances to MEM/WB on this edge.
       ex_mem_valid       <= 1'b0;
