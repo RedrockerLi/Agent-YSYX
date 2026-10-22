@@ -12,7 +12,7 @@ module sub33 (
   wire [31:0] sum;
   wire        cout;
 
-  adder32 u_add (
+  add32cs u_add (
     .a    (a[31:0]),
     .b    (~b),
     .cin  (1'b1),

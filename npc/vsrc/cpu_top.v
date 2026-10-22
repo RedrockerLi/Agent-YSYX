@@ -183,6 +183,7 @@ module cpu_top #(
   wire [31:0] bpu_lp0, bpu_lp1, bpu_lp2, bpu_lp3;
 
   reg         fetch_start_r;
+  reg         fetch_start_r2;
   reg  [3:0]  fetch_pred_taken;
   reg  [31:0] fetch_pred_target [0:3];
 
@@ -295,14 +296,16 @@ module cpu_top #(
   always @(posedge clock) begin
     if (reset) begin
       fetch_start_r    <= 1'b0;
+      fetch_start_r2   <= 1'b0;
       fetch_pred_taken <= 4'b0;
       fetch_pred_target[0] <= 32'b0;
       fetch_pred_target[1] <= 32'b0;
       fetch_pred_target[2] <= 32'b0;
       fetch_pred_target[3] <= 32'b0;
     end else begin
-      fetch_start_r <= fetch_start;
-      if (fetch_start_r) begin
+      fetch_start_r  <= fetch_start;
+      fetch_start_r2 <= fetch_start_r;
+      if (fetch_start_r2) begin
         fetch_pred_taken  <= {bpu_lt3, bpu_lt2, bpu_lt1, bpu_lt0};
         fetch_pred_target[0] <= bpu_lp0;
         fetch_pred_target[1] <= bpu_lp1;
@@ -320,14 +323,24 @@ module cpu_top #(
   reg [31:0] if_id_inst;
   reg        if_id_pred_taken;
   reg [31:0] if_id_pred_target;
+  // Control-transfer flag decoded one stage early, so the fetch redirect does
+  // not carry the instruction decode.
+  reg        if_id_is_ctrl;
+
+  wire fq_head_is_ctrl = (fq_head_inst[6:2] == 5'b11000) ||  // branch
+                         (fq_head_inst[6:2] == 5'b11011) ||  // jal
+                         ((fq_head_inst[6:2] == 5'b11001) &&     // jalr
+                          (fq_head_inst[14:12] == 3'b000));
 
   always @(posedge clock) begin
-    if (reset || icache_flush) begin
+    if (reset || ex_redirect || fence_flush ||
+        (id_pred_redirect && !id_stall)) begin
       if_id_valid       <= 1'b0;
       if_id_pc          <= 32'b0;
       if_id_inst        <= 32'h00000013; // NOP
       if_id_pred_taken  <= 1'b0;
       if_id_pred_target <= 32'b0;
+      if_id_is_ctrl     <= 1'b0;
     end else if (!id_stall) begin
       if (fq_count != 4'd0) begin
         if_id_valid       <= 1'b1;
@@ -335,12 +348,14 @@ module cpu_top #(
         if_id_inst        <= fq_head_inst;
         if_id_pred_taken  <= fq_head_ptaken;
         if_id_pred_target <= fq_head_ptarget;
+        if_id_is_ctrl     <= fq_head_is_ctrl;
       end else begin
         if_id_valid       <= 1'b0;
         if_id_pc          <= 32'b0;
         if_id_inst        <= 32'h00000013; // NOP
         if_id_pred_taken  <= 1'b0;
         if_id_pred_target <= 32'b0;
+        if_id_is_ctrl     <= 1'b0;
       end
     end
   end
@@ -373,8 +388,11 @@ module cpu_top #(
 
   // The BPU lookup result is captured with the instruction into IF/ID, so the
   // ID-stage redirect uses a flop instead of the BTB read path.
-  assign id_pred_redirect = if_id_valid && !id_stall && !ex_redirect && !fence_flush &&
-                            (id_is_branch || id_is_jal || id_is_jalr) &&
+  // A predicted-taken branch redirects fetch as soon as it is decoded.  The
+  // redirect does not wait for a hazard stall of the decode stage: the
+  // instruction itself stays in IF/ID until the stall clears.
+  assign id_pred_redirect = if_id_valid && !ex_redirect && !fence_flush &&
+                            if_id_is_ctrl &&
                             if_id_pred_taken;
   wire id_is_load    = (id_opcode == 7'b0000011);
   wire id_is_store   = (id_opcode == 7'b0100011);
@@ -492,6 +510,7 @@ module cpu_top #(
   // Pipeline Register: ID / EX
   // =========================================================================
   reg [31:0] id_ex_pc;
+  reg [31:0] id_ex_pc_plus4;
   reg [31:0] id_ex_inst;
   reg [4:0]  id_ex_rs1;
   reg [4:0]  id_ex_rs2;
@@ -531,6 +550,7 @@ module cpu_top #(
     if (reset || id_ex_flush) begin
       id_ex_valid       <= 1'b0;
       id_ex_pc          <= 32'b0;
+      id_ex_pc_plus4    <= 32'b0;
       id_ex_inst        <= 32'h00000013; // NOP
       id_ex_rd          <= 5'b0;
       id_ex_rs1         <= 5'b0;
@@ -571,6 +591,7 @@ module cpu_top #(
     end else begin
       id_ex_valid       <= if_id_valid;
       id_ex_pc          <= if_id_pc;
+      id_ex_pc_plus4    <= if_id_pc + 32'd4;
       id_ex_inst        <= if_id_inst;
       id_ex_rd          <= if_id_valid ? id_rd : 5'd0;
       id_ex_rs1         <= if_id_valid ? id_rs1 : 5'd0;
@@ -610,7 +631,7 @@ module cpu_top #(
     if (reset)
       fence_next_pc <= RESET_VAL;
     else if (id_ex_valid && id_ex_is_fence_i && !mem_stall && !ex_mdu_stall)
-      fence_next_pc <= id_ex_pc + 32'd4;
+      fence_next_pc <= id_ex_pc_plus4;
   end
 
   // =========================================================================
@@ -642,37 +663,41 @@ module cpu_top #(
                          id_ex_is_auipc || id_ex_is_branch ||
                          id_ex_is_jal || id_ex_is_jalr) ? id_ex_imm : ex_src2;
 
-  wire [31:0] ex_pc_plus4;
-  wire        ex_pc4_cout;
-
-  adder32 u_ex_pc4 (
-    .a    (id_ex_pc),
-    .b    (32'd4),
-    .cin  (1'b0),
-    .sum  (ex_pc_plus4),
-    .cout (ex_pc4_cout)
-  );
+  // pc+4 is captured at the ID/EX boundary so the redirect target mux does
+  // not carry a 32-bit adder.
+  wire [31:0] ex_pc_plus4 = id_ex_pc_plus4;
 
   // The ALU is multi-cycle; the instruction occupies EX until `done`.
   wire is_alu_op = id_ex_valid && (id_ex_is_alu_r || id_ex_is_alu_i ||
                    id_ex_is_load || id_ex_is_store || id_ex_is_auipc ||
                    id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr);
   assign alu_start    = is_alu_op && !alu_busy && !alu_done && !ex_redirect_r;
-  assign alu_accept   = alu_done && !mem_stall;
+  // The ALU and the MDU share one EX slot; an instruction may only leave when
+  // every unit it uses has finished, otherwise the unit that finished first
+  // would restart while the other is still running.
+  wire ex_div_pending = id_ex_valid && id_ex_is_div && !div_done;
+  wire ex_mul_pending = id_ex_valid && id_ex_is_mul && !mul_done;
+  wire ex_alu_pending = is_alu_op && !alu_done;
+  assign alu_accept   = alu_done && !mem_stall && !ex_div_pending && !ex_mul_pending;
   assign ex_alu_stall = is_alu_op && !alu_accept;
 
   wire [31:0] alu_res;
+  wire        branch_met_r;
   alu u_alu (
     .clock  (clock),
     .reset  (reset),
     .start  (alu_start),
     .accept (alu_accept),
     .alu_op (id_ex_alu_op),
+    .cmp_op (id_ex_funct3),
     .src1   (alu_in1),
     .src2   (alu_in2),
+    .cmp_a  (ex_src1),
+    .cmp_b  (ex_src2),
     .busy   (alu_busy),
     .done   (alu_done),
-    .res    (alu_res)
+    .res    (alu_res),
+    .cmp_out(branch_met_r)
   );
 
   // Capture the store data at the ALU start, when the forwarding sources
@@ -689,10 +714,10 @@ module cpu_top #(
   // raises done; the result is captured by EX/MEM on the accept cycle.
   assign div_start    = id_ex_valid && id_ex_is_div && !div_busy && !div_done &&
                         !ex_redirect_r;
-  assign div_accept   = div_done && !mem_stall;
   assign mul_start    = id_ex_valid && id_ex_is_mul && !mul_busy && !mul_done &&
                         !ex_redirect_r;
-  assign mul_accept   = mul_done && !mem_stall;
+  assign div_accept   = div_done && !mem_stall && !ex_alu_pending && !ex_mul_pending;
+  assign mul_accept   = mul_done && !mem_stall && !ex_alu_pending && !ex_div_pending;
   assign ex_mdu_stall = !ex_redirect_r &&
                         ((id_ex_valid && id_ex_is_div && !div_accept) ||
                          (id_ex_valid && id_ex_is_mul && !mul_accept));
@@ -727,29 +752,8 @@ module cpu_top #(
     .res    (mul_res)
   );
 
-  // Branch Evaluation
-  reg branch_cond_met;
-  always @(*) begin
-    case (id_ex_funct3)
-      3'b000:  branch_cond_met = (ex_src1 == ex_src2);                  // BEQ
-      3'b001:  branch_cond_met = (ex_src1 != ex_src2);                  // BNE
-      3'b100:  branch_cond_met = ($signed(ex_src1) < $signed(ex_src2)); // BLT
-      3'b101:  branch_cond_met = ($signed(ex_src1) >= $signed(ex_src2));// BGE
-      3'b110:  branch_cond_met = (ex_src1 < ex_src2);                   // BLTU
-      3'b111:  branch_cond_met = (ex_src1 >= ex_src2);                  // BGEU
-      default: branch_cond_met = 1'b0;
-    endcase
-  end
-
-  // The branch condition is sampled when the ALU starts, so the redirect in
-  // the ALU accept cycle uses a stable value.
-  reg branch_met_r;
-  always @(posedge clock) begin
-    if (reset)
-      branch_met_r <= 1'b0;
-    else if (alu_start)
-      branch_met_r <= branch_cond_met;
-  end
+  // Branch Evaluation: the ALU registers the comparison from its operand
+  // flops, so the decision does not include the forwarding mux.
 
   wire ex_actual_taken = id_ex_is_branch ? branch_met_r : (id_ex_is_jal || id_ex_is_jalr);
 
@@ -795,10 +799,20 @@ module cpu_top #(
                          id_ex_valid &&
                          (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
 
-  wire [31:0] ex_redirect_target_now = id_ex_is_ecall   ? mtvec :
-                                       id_ex_is_mret    ? mepc :
-                                       id_ex_is_fence_i ? ex_pc_plus4 :
-                                                          ex_correct_next_pc;
+  // One-hot select instead of a chain of 32-bit muxes.
+  wire sel_ecall  = id_ex_is_ecall;
+  wire sel_mret   = id_ex_is_mret;
+  wire sel_fence  = id_ex_is_fence_i;
+  wire sel_branch = !sel_ecall && !sel_mret && !sel_fence && id_ex_is_branch;
+  wire sel_link   = !sel_ecall && !sel_mret && !sel_fence && !id_ex_is_branch;
+  wire sel_taken  = (sel_branch & branch_met_r) | (sel_link & (id_ex_is_jal | id_ex_is_jalr));
+
+  wire [31:0] ex_redirect_target_now =
+      ({32{sel_ecall}}  & mtvec)       |
+      ({32{sel_mret}}   & mepc)        |
+      ({32{sel_fence}}  & ex_pc_plus4) |
+      ({32{sel_taken}}  & alu_res)     |
+      ({32{~sel_ecall & ~sel_mret & ~sel_fence & ~sel_taken}} & ex_pc_plus4);
 
   always @(posedge clock) begin
     if (reset) begin
@@ -848,8 +862,8 @@ module cpu_top #(
 
   // Branch Prediction Unit
   bpu #(
-    .BTB_ENTRIES      (32),
-    .INDEX_WIDTH      (5)
+    .BTB_ENTRIES      (16),
+    .INDEX_WIDTH      (4)
   ) u_bpu (
     .clock            (clock),
     .reset            (reset),

@@ -32,8 +32,11 @@ module div_unit #(
 
   localparam S_IDLE = 3'd0;
   localparam S_CONV = 3'd1;
+  localparam S_CONV2 = 3'd5;
   localparam S_ITER = 3'd2;
+  localparam S_ITER2 = 3'd7;
   localparam S_SIGN = 3'd3;
+  localparam S_SIGN2 = 3'd6;
   localparam S_DONE = 3'd4;
 
   wire is_signed = ~alu_op[0];
@@ -41,10 +44,12 @@ module div_unit #(
 
   reg [2:0]    state;
   reg [31:0]   a_raw, b_raw;
+  reg [31:0]   a_neg_r, b_neg_r;
   reg [31:0]   a_mag, b_mag;
   reg          sign1_r, sign2_r;
   reg          is_signed_r, is_rem_r;
   reg [31:0]   dividend;
+  reg [31:0]   q_neg_r, r_neg_r;
   reg [31:0]   quot;
   reg [PW-1:0] rem;
   reg [CW-1:0] iter;
@@ -53,27 +58,19 @@ module div_unit #(
 
   assign done = done_r;
 
-  wire [31:0] a_mag_neg, b_mag_neg;
-  wire        a_mag_cout, b_mag_cout;
+  // 32-bit two's-complement negate as two parallel 16-bit halves with a
+  // carry select, so the add is one short level instead of a 32-bit chain.
+  wire [15:0] a_neg_lo, a_neg_hi_1, b_neg_lo, b_neg_hi_1;
+  wire        a_neg_c, b_neg_c;
+  add16cs u_a_neg_lo (.a(~a_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(a_neg_lo), .cout(a_neg_c));
+  add16cs u_a_neg_hi (.a(~a_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(a_neg_hi_1), .cout());
+  add16cs u_b_neg_lo (.a(~b_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(b_neg_lo), .cout(b_neg_c));
+  add16cs u_b_neg_hi (.a(~b_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(b_neg_hi_1), .cout());
+  wire [31:0] a_mag_neg = {a_neg_c ? a_neg_hi_1 : ~a_raw[31:16], a_neg_lo};
+  wire [31:0] b_mag_neg = {b_neg_c ? b_neg_hi_1 : ~b_raw[31:16], b_neg_lo};
 
-  adder32 u_a_mag (
-    .a    (~a_raw),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (a_mag_neg),
-    .cout (a_mag_cout)
-  );
-
-  adder32 u_b_mag (
-    .a    (~b_raw),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (b_mag_neg),
-    .cout (b_mag_cout)
-  );
-
-  wire [31:0] a_mag_c = (is_signed_r && sign1_r) ? a_mag_neg : a_raw;
-  wire [31:0] b_mag_c = (is_signed_r && sign2_r) ? b_mag_neg : b_raw;
+  wire [31:0] a_mag_c = (is_signed_r && sign1_r) ? a_neg_r : a_raw;
+  wire [31:0] b_mag_c = (is_signed_r && sign2_r) ? b_neg_r : b_raw;
 
   localparam [31:0]   ITERS_V = ITERS;
   localparam [CW-1:0] LAST    = ITERS_V[CW-1:0] - 1'b1;
@@ -82,6 +79,10 @@ module div_unit #(
   reg [PW-1:0] rem_t;
   reg [31:0]   quot_t;
   reg [31:0]   div_t;
+  // Radix-2 iteration registers: the compare/subtract and the restore/select
+  // are split so the subtract tail does not chain into the remainder flops.
+  reg [32:0]   a33_r, diff33_r;
+  reg          ge_r;
   reg [PW:0]   shifted_r;
   reg [PW:0]   b_ext_r;
   reg [PW:0]   diff_r;
@@ -127,27 +128,17 @@ module div_unit #(
   wire q_sign = is_signed_r && (sign1_r ^ sign2_r);
   wire r_sign = is_signed_r && sign1_r;
 
-  wire [31:0] q_neg, r_neg;
-  wire        q_neg_cout, r_neg_cout;
+  wire [15:0] q_neg_lo, q_neg_hi_1, r_neg_lo, r_neg_hi_1;
+  wire        q_neg_c, r_neg_c;
+  add16cs u_q_neg_lo (.a(~quot[15:0]), .b(16'd0), .cin(1'b1), .sum(q_neg_lo), .cout(q_neg_c));
+  add16cs u_q_neg_hi (.a(~quot[31:16]), .b(16'd0), .cin(1'b1), .sum(q_neg_hi_1), .cout());
+  add16cs u_r_neg_lo (.a(~rem[15:0]), .b(16'd0), .cin(1'b1), .sum(r_neg_lo), .cout(r_neg_c));
+  add16cs u_r_neg_hi (.a(~rem[31:16]), .b(16'd0), .cin(1'b1), .sum(r_neg_hi_1), .cout());
+  wire [31:0] q_neg = {q_neg_c ? q_neg_hi_1 : ~quot[31:16], q_neg_lo};
+  wire [31:0] r_neg = {r_neg_c ? r_neg_hi_1 : ~rem[31:16], r_neg_lo};
 
-  adder32 u_q_neg (
-    .a    (~quot),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (q_neg),
-    .cout (q_neg_cout)
-  );
-
-  adder32 u_r_neg (
-    .a    (~rem[31:0]),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (r_neg),
-    .cout (r_neg_cout)
-  );
-
-  wire [31:0] q_final = q_sign ? q_neg : quot;
-  wire [31:0] r_final = r_sign ? r_neg : rem[31:0];
+  wire [31:0] q_final = q_sign ? q_neg_r : quot;
+  wire [31:0] r_final = r_sign ? r_neg_r : rem[31:0];
 
   always @(posedge clock) begin
     if (reset) begin
@@ -157,6 +148,8 @@ module div_unit #(
       res         <= 32'b0;
       a_raw       <= 32'b0;
       b_raw       <= 32'b0;
+      a_neg_r     <= 32'b0;
+      b_neg_r     <= 32'b0;
       a_mag       <= 32'b0;
       b_mag       <= 32'b0;
       sign1_r     <= 1'b0;
@@ -164,7 +157,12 @@ module div_unit #(
       is_signed_r <= 1'b0;
       is_rem_r    <= 1'b0;
       dividend    <= 32'b0;
+      q_neg_r     <= 32'b0;
+      r_neg_r     <= 32'b0;
       quot        <= 32'b0;
+      a33_r       <= 33'b0;
+      diff33_r    <= 33'b0;
+      ge_r        <= 1'b0;
       rem         <= {PW{1'b0}};
       iter        <= {CW{1'b0}};
       zero_div    <= 1'b0;
@@ -184,18 +182,32 @@ module div_unit #(
         end
 
         S_CONV: begin
+          // Register the negated magnitudes first; the sign mux gets its own
+          // cycle so the 32-bit increment is not followed by a mux.
+          a_neg_r  <= a_mag_neg;
+          b_neg_r  <= b_mag_neg;
+          zero_div <= (b_raw == 32'b0);
+          state    <= S_CONV2;
+        end
+
+        S_CONV2: begin
           a_mag    <= a_mag_c;
           b_mag    <= b_mag_c;
           dividend <= a_mag_c;
           quot     <= 32'b0;
           rem      <= {PW{1'b0}};
           iter     <= {CW{1'b0}};
-          zero_div <= (b_raw == 32'b0);
-          state    <= (b_raw == 32'b0) ? S_SIGN : S_ITER;
+          state    <= zero_div ? S_SIGN : S_ITER;
         end
 
         S_ITER: begin
-          if (iter == LAST) begin
+          if (K == 1) begin
+            a33_r    <= div_a33;
+            diff33_r <= div_diff33;
+            ge_r     <= div_ge33;
+            dividend <= dividend << 1;
+            state    <= S_ITER2;
+          end else if (iter == LAST) begin
             quot  <= quot_t;
             rem   <= rem_t;
             state <= S_SIGN;
@@ -207,9 +219,26 @@ module div_unit #(
           end
         end
 
+        S_ITER2: begin
+          rem  <= ge_r ? diff33_r : a33_r;
+          quot <= {quot[30:0], ge_r};
+          if (iter == LAST)
+            state <= S_SIGN;
+          else begin
+            iter  <= iter + 1'b1;
+            state <= S_ITER;
+          end
+        end
+
         S_SIGN: begin
-          // quot/rem hold the final magnitudes.  Register the sign-corrected
-          // result so the CPU sees a stable value in S_DONE.
+          // quot/rem hold the final magnitudes.  The negations get their own
+          // cycle so the 32-bit add and the sign mux are not chained.
+          q_neg_r <= q_neg;
+          r_neg_r <= r_neg;
+          state   <= S_SIGN2;
+        end
+
+        S_SIGN2: begin
           if (zero_div)
             res <= is_rem_r ? a_raw : 32'hffffffff;
           else

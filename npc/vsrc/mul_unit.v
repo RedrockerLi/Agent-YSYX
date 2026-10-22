@@ -37,11 +37,13 @@ module mul_unit #(
   localparam S_IDLE   = 4'd0;
   localparam S_CONV   = 4'd5;
   localparam S_MULT   = 4'd7;
+  localparam S_MULT2  = 4'd11;
   localparam S_ITER   = 4'd1;
   localparam S_FINAL  = 4'd2;
   localparam S_FINAL_HI = 4'd8;
   localparam S_NEG    = 4'd6;
   localparam S_NEG_HI = 4'd9;
+  localparam S_NEG_SEL = 4'd10;
   localparam S_SELECT = 4'd3;
   localparam S_DONE   = 4'd4;
 
@@ -73,11 +75,13 @@ module mul_unit #(
   reg [31:0]   prod_lo;
   reg          lo_cout_r;
   reg [31:0]   neg_lo_r;
+  reg [31:0]   neg_hi_r;
   reg          neg_cout_r;
 
   // The 64-bit product sum and sign negation are split into two 32-bit
   // carry-select halves, one per cycle.
-  wire [31:0] sum_lo, sum_hi, neg_lo_sum, neg_hi_sum;
+  wire [31:0] sum_lo, sum_hi;
+  wire [31:0] neg_lo_sum, neg_hi_sum;
   wire        sum_lo_cout, neg_lo_cout;
 
   adder32 u_sum_lo (
@@ -96,21 +100,21 @@ module mul_unit #(
     .cout ()
   );
 
-  adder32 u_neg_lo (
-    .a    (~prod_u[31:0]),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (neg_lo_sum),
-    .cout (neg_lo_cout)
-  );
+  // Two's-complement negate of the 64-bit product: each 32-bit half is a
+  // carry-select of two parallel 16-bit adds.
+  wire [31:0] p_lo = prod_u[31:0];
+  wire [31:0] p_hi = prod_u[63:32];
 
-  adder32 u_neg_hi (
-    .a    (~prod_u[63:32]),
-    .b    (32'd0),
-    .cin  (neg_cout_r),
-    .sum  (neg_hi_sum),
-    .cout ()
-  );
+  wire [15:0] nl_lo, nl_hi_1, nh_lo, nh_hi_1;
+  wire        nl_c, nh_c;
+  add16cs u_nl_lo (.a(~p_lo[15:0]), .b(16'd0), .cin(1'b1), .sum(nl_lo), .cout(nl_c));
+  add16cs u_nl_hi (.a(~p_lo[31:16]), .b(16'd0), .cin(nl_c), .sum(nl_hi_1), .cout());
+  assign neg_lo_sum  = {nl_hi_1, nl_lo};
+  assign neg_lo_cout = ~|p_lo;
+
+  add16cs u_nh_lo (.a(~p_hi[15:0]), .b(16'd0), .cin(neg_cout_r), .sum(nh_lo), .cout(nh_c));
+  add16cs u_nh_hi (.a(~p_hi[31:16]), .b(16'd0), .cin(nh_c), .sum(nh_hi_1), .cout());
+  assign neg_hi_sum  = {nh_hi_1, nh_lo};
 
   assign done = done_r;
 
@@ -118,24 +122,14 @@ module mul_unit #(
   // forwarding mux and the 32-bit negate/add are not in the start-cycle path.
   wire a_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH) || (op_r == OP_MULHSU);
   wire b_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH);
-  wire [31:0] a_neg_sum, b_neg_sum;
-  wire        a_neg_cout, b_neg_cout;
-
-  adder32 u_a_neg (
-    .a    (~a_raw),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (a_neg_sum),
-    .cout (a_neg_cout)
-  );
-
-  adder32 u_b_neg (
-    .a    (~b_raw),
-    .b    (32'd0),
-    .cin  (1'b1),
-    .sum  (b_neg_sum),
-    .cout (b_neg_cout)
-  );
+  wire [15:0] a_neg_lo, a_neg_hi_1, b_neg_lo, b_neg_hi_1;
+  wire        a_neg_c, b_neg_c;
+  add16cs u_a_neg_lo (.a(~a_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(a_neg_lo), .cout(a_neg_c));
+  add16cs u_a_neg_hi (.a(~a_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(a_neg_hi_1), .cout());
+  add16cs u_b_neg_lo (.a(~b_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(b_neg_lo), .cout(b_neg_c));
+  add16cs u_b_neg_hi (.a(~b_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(b_neg_hi_1), .cout());
+  wire [31:0] a_neg_sum = {a_neg_c ? a_neg_hi_1 : ~a_raw[31:16], a_neg_lo};
+  wire [31:0] b_neg_sum = {b_neg_c ? b_neg_hi_1 : ~b_raw[31:16], b_neg_lo};
 
   wire [31:0] a_mag_s = (a_signed_r && a_raw[31]) ? a_neg_sum : a_raw;
   wire [31:0] b_mag_s = (b_signed_r && b_raw[31]) ? b_neg_sum : b_raw;
@@ -157,6 +151,11 @@ module mul_unit #(
       assign pp[gj]    = {{(AW-34){1'b0}}, mult[gj]} << (2*(DIGITS-1-gj));
     end
   endgenerate
+
+  // 3*b = b + 2*b, built from 16-bit halves so no 32-bit add is needed.
+  reg  [16:0] b3_lo_r;
+  wire [16:0] b3_hi_w = {1'b0, b1[31:16]} + {1'b0, b1[30:15]} + {16'b0, b3_lo_r[16]};
+  wire [1:0]  b3_top  = {1'b0, b1[31]} + {1'b0, b3_hi_w[16]};
 
   // 3:2 carry-save compressor.  Returns {sum, carry}; the carry vector is
   // already shifted left by one, so the represented value is sum + carry.
@@ -208,6 +207,7 @@ module mul_unit #(
       b1        <= 32'b0;
       b2        <= 33'b0;
       b3        <= 34'b0;
+      b3_lo_r   <= 17'b0;
       a_shift   <= 32'b0;
       acc_sum   <= {AW{1'b0}};
       acc_carry <= {AW{1'b0}};
@@ -219,6 +219,7 @@ module mul_unit #(
       prod_lo   <= 32'b0;
       lo_cout_r <= 1'b0;
       neg_lo_r  <= 32'b0;
+      neg_hi_r  <= 32'b0;
       neg_cout_r <= 1'b0;
     end else begin
       case (state)
@@ -248,15 +249,22 @@ module mul_unit #(
 
         S_MULT: begin
           b2      <= {1'b0, b1} << 1;
-          b3      <= ({2'b0, b1} << 1) + {2'b0, b1};
+          b3_lo_r <= {1'b0, b1[15:0]} + {1'b0, b1[14:0], 1'b0};
           a_shift <= a_mag_r;
           if ((a_mag_r == 32'b0) || (b_mag_r == 32'b0)) begin
             res    <= 32'b0;
             done_r <= 1'b1;
             state  <= S_DONE;
           end else begin
-            state  <= S_ITER;
+            state  <= S_MULT2;
           end
+        end
+
+        S_MULT2: begin
+          // 3*b needs its own cycle: the high half adds on top of the low
+          // half's carry.
+          b3    <= {b3_top, b3_hi_w[15:0], b3_lo_r[15:0]};
+          state <= S_ITER;
         end
 
         S_ITER: begin
@@ -288,7 +296,12 @@ module mul_unit #(
         end
 
         S_NEG_HI: begin
-          prod_r <= neg_r ? {neg_hi_sum, neg_lo_r} : prod_u;
+          neg_hi_r <= neg_hi_sum;
+          state    <= S_NEG_SEL;
+        end
+
+        S_NEG_SEL: begin
+          prod_r <= neg_r ? {neg_hi_r, neg_lo_r} : prod_u;
           state  <= S_SELECT;
         end
 
