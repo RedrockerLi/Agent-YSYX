@@ -912,6 +912,23 @@ module cpu_top #(
   wire        dcache_mem_resp_valid;
   wire [31:0] dcache_mem_resp_rdata;
   wire        dcache_mem_resp_rlast;
+  wire        dcache_req_ready;
+
+  // The synchronous D-cache needs a one-shot request; the EX/MEM instruction
+  // is held by mem_stall until the response is visible.
+  reg         mem_req_accepted;
+  wire        dcache_req_valid = !reset && ex_mem_valid &&
+                                 (ex_mem_is_load || ex_mem_is_store) &&
+                                 !mem_req_accepted;
+
+  always @(posedge clock) begin
+    if (reset)
+      mem_req_accepted <= 1'b0;
+    else if (dcache_resp_valid)
+      mem_req_accepted <= 1'b0;
+    else if (dcache_req_valid && dcache_req_ready)
+      mem_req_accepted <= 1'b1;
+  end
 
   dcache #(
     .SET_WIDTH    (6),
@@ -920,11 +937,12 @@ module cpu_top #(
   ) u_dcache (
     .clock          (clock),
     .reset          (reset),
-    .req_valid      (!reset && ex_mem_valid && (ex_mem_is_load || ex_mem_is_store)),
+    .req_valid      (dcache_req_valid),
     .req_write      (ex_mem_is_store),
     .req_addr       (ex_mem_alu_res),
     .req_wdata      (ex_mem_store_data),
     .req_wmask      (ex_mem_store_mask),
+    .req_ready      (dcache_req_ready),
     .resp_valid     (dcache_resp_valid),
     .resp_rdata     (dcache_resp_rdata),
     .fence_i        (ex_mem_valid && ex_mem_is_fence_i),
