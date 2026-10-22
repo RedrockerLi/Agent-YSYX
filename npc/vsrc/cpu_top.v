@@ -119,7 +119,6 @@ module cpu_top #(
   // Forward declarations of pipeline control signals
   wire mem_stall;
   wire id_stall;
-  wire pc_stall;
   wire ex_redirect;
   wire [31:0] ex_redirect_target;
   wire        div_busy;
@@ -137,7 +136,10 @@ module cpu_top #(
 
   // Cache Wires
   wire        icache_resp_valid;
-  wire [31:0] icache_resp_rdata;
+  wire        icache_req_ready;
+  wire [127:0] icache_resp_line;
+  wire [1:0]  icache_resp_word_sel;
+  wire        icache_flush;
   wire        dcache_resp_valid;
   wire [31:0] dcache_resp_rdata;
   wire        dcache_fence_done;
@@ -148,23 +150,85 @@ module cpu_top #(
   wire [31:0] dcache_miss_cnt;
 
   // =========================================================================
-  // Stage 1: IF (Instruction Fetch & Branch Prediction)
+  // Stage 1: Fetch (synchronous ICache read + instruction FIFO)
   // =========================================================================
-  reg  [31:0] pc;
+  reg  [31:0] fetch_pc;
+  reg  [31:0] fetch_req_pc;
+  reg  [31:0] fence_next_pc;
+  reg         fetch_pending;
+  reg  [3:0]  fq_count;
+  reg  [2:0]  fq_head;
+  reg  [2:0]  fq_tail;
+  reg  [31:0] fq_pc   [0:7];
+  reg  [31:0] fq_inst [0:7];
+
   wire [31:0] bpu_pred_target;
   wire        bpu_pred_taken;
   wire [31:0] bpu_total_pred_cnt;
   wire [31:0] bpu_correct_pred_cnt;
+  wire        id_pred_redirect;
+  wire        fence_flush;
 
-  wire [31:0] if_pc_next = ex_redirect ? ex_redirect_target :
-                           pc_stall    ? pc :
-                           bpu_pred_taken ? bpu_pred_target : (pc + 32'd4);
+  wire [1:0]  fetch_req_off   = fetch_req_pc[3:2];
+  wire [31:0] fetch_word_base = {30'b0, fetch_req_off};
+  wire [2:0]  fetch_req_words = 3'd4 - {1'b0, fetch_req_off};
+  wire [31:0] fetch_next_line = {fetch_req_pc[31:4], 4'b0} + 32'd16;
+
+  wire fetch_start = !fetch_pending && (fq_count <= 4'd2) &&
+                     icache_req_ready && !icache_flush;
+  wire fq_push     = icache_resp_valid && !icache_flush;
+  wire fq_pop      = !id_stall && (fq_count != 4'd0) && !icache_flush;
+
+  assign icache_flush = ex_redirect || id_pred_redirect || fence_flush;
 
   always @(posedge clock) begin
     if (reset) begin
-      pc <= RESET_VAL;
+      fetch_pc      <= RESET_VAL;
+      fetch_req_pc  <= RESET_VAL;
+      fence_next_pc <= RESET_VAL;
+      fetch_pending <= 1'b0;
+    end else if (fence_flush) begin
+      fetch_pc      <= fence_next_pc;
+      fetch_pending <= 1'b0;
+    end else if (ex_redirect) begin
+      fetch_pc      <= ex_redirect_target;
+      fetch_pending <= 1'b0;
+    end else if (id_pred_redirect) begin
+      fetch_pc      <= bpu_pred_target;
+      fetch_pending <= 1'b0;
+    end else if (fetch_start) begin
+      fetch_req_pc  <= fetch_pc;
+      fetch_pending <= 1'b1;
+    end else if (icache_resp_valid) begin
+      fetch_pending <= 1'b0;
+      fetch_pc      <= fetch_next_line;
+    end
+  end
+
+  integer fqi;
+  always @(posedge clock) begin
+    if (reset) begin
+      fq_count <= 4'd0;
+      fq_head  <= 3'd0;
+      fq_tail  <= 3'd0;
+    end else if (icache_flush) begin
+      fq_count <= 4'd0;
+      fq_head  <= 3'd0;
+      fq_tail  <= 3'd0;
     end else begin
-      pc <= if_pc_next;
+      if (fq_push) begin
+        for (fqi = 0; fqi < 4; fqi = fqi + 1) begin
+          if (fqi < fetch_req_words) begin
+            fq_pc[(fq_tail + fqi[2:0]) & 3'd7]   <= fetch_req_pc + (fqi << 2);
+            fq_inst[(fq_tail + fqi[2:0]) & 3'd7] <=
+                icache_resp_line[32*((fetch_word_base + fqi) & 32'd3) +: 32];
+          end
+        end
+      end
+      if (fq_pop)  fq_head <= fq_head + 3'd1;
+      if (fq_push) fq_tail <= fq_tail + fetch_req_words;
+      fq_count <= fq_count + (fq_push ? {1'b0, fetch_req_words} : 4'd0) -
+                  (fq_pop ? 4'd1 : 4'd0);
     end
   end
 
@@ -174,33 +238,21 @@ module cpu_top #(
   reg        if_id_valid;
   reg [31:0] if_id_pc;
   reg [31:0] if_id_inst;
-  reg        if_id_pred_taken;
-  reg [31:0] if_id_pred_target;
-
-  wire if_id_flush = ex_redirect;
-  wire if_stall    = !icache_resp_valid;
-  assign pc_stall  = if_stall || id_stall || mem_stall || ex_mdu_stall;
 
   always @(posedge clock) begin
-    if (reset || if_id_flush) begin
-      if_id_valid       <= 1'b0;
-      if_id_pc          <= 32'b0;
-      if_id_inst        <= 32'h00000013; // NOP
-      if_id_pred_taken  <= 1'b0;
-      if_id_pred_target <= 32'b0;
+    if (reset || icache_flush) begin
+      if_id_valid <= 1'b0;
+      if_id_pc    <= 32'b0;
+      if_id_inst  <= 32'h00000013; // NOP
     end else if (!id_stall) begin
-      if (icache_resp_valid) begin
-        if_id_valid       <= 1'b1;
-        if_id_pc          <= pc;
-        if_id_inst        <= icache_resp_rdata;
-        if_id_pred_taken  <= bpu_pred_taken;
-        if_id_pred_target <= bpu_pred_target;
+      if (fq_count != 4'd0) begin
+        if_id_valid <= 1'b1;
+        if_id_pc    <= fq_pc[fq_head];
+        if_id_inst  <= fq_inst[fq_head];
       end else begin
-        if_id_valid       <= 1'b0;
-        if_id_pc          <= 32'b0;
-        if_id_inst        <= 32'h00000013; // NOP
-        if_id_pred_taken  <= 1'b0;
-        if_id_pred_target <= 32'b0;
+        if_id_valid <= 1'b0;
+        if_id_pc    <= 32'b0;
+        if_id_inst  <= 32'h00000013; // NOP
       end
     end
   end
@@ -230,6 +282,12 @@ module cpu_top #(
   wire id_is_jal     = (id_opcode == 7'b1101111);
   wire id_is_jalr    = (id_opcode == 7'b1100111 && id_funct3 == 3'b000);
   wire id_is_branch  = (id_opcode == 7'b1100011);
+
+  // The BPU is looked up with the decoded PC; a predicted-taken control
+  // instruction redirects the fetch unit at the end of ID.
+  assign id_pred_redirect = if_id_valid && !id_stall && !ex_redirect && !fence_flush &&
+                            (id_is_branch || id_is_jal || id_is_jalr) &&
+                            bpu_pred_taken;
   wire id_is_load    = (id_opcode == 7'b0000011);
   wire id_is_store   = (id_opcode == 7'b0100011);
   wire id_is_alu_i   = (id_opcode == 7'b0010011);
@@ -375,7 +433,7 @@ module cpu_top #(
   reg        id_ex_pred_taken;
   reg [31:0] id_ex_pred_target;
 
-  wire id_ex_flush = !mem_stall && (ex_redirect || load_use_hazard);
+  wire id_ex_flush = (!mem_stall && (ex_redirect || load_use_hazard)) || fence_flush;
 
   always @(posedge clock) begin
     if (reset || id_ex_flush) begin
@@ -449,9 +507,18 @@ module cpu_top #(
       id_ex_is_fence_i  <= if_id_valid ? id_is_fence_i : 1'b0;
       id_ex_is_div      <= if_id_valid ? id_is_div : 1'b0;
       id_ex_is_mul      <= if_id_valid ? id_is_mul : 1'b0;
-      id_ex_pred_taken  <= if_id_pred_taken;
-      id_ex_pred_target <= if_id_pred_target;
+      id_ex_pred_taken  <= bpu_pred_taken;
+      id_ex_pred_target <= bpu_pred_target;
     end
+  end
+
+  // Latch the fence.i restart PC when the fence leaves EX.  The MEM-stage
+  // fence flush uses it to restart fetch after the I-cache invalidation.
+  always @(posedge clock) begin
+    if (reset)
+      fence_next_pc <= RESET_VAL;
+    else if (id_ex_valid && id_ex_is_fence_i && !mem_stall && !ex_mdu_stall)
+      fence_next_pc <= id_ex_pc + 32'd4;
   end
 
   // =========================================================================
@@ -498,7 +565,7 @@ module cpu_top #(
                         (id_ex_valid && id_ex_is_mul && !mul_accept);
 
   div_unit #(
-    .DIV_BITS_PER_CYCLE (2)
+    .DIV_BITS_PER_CYCLE (1)
   ) u_div_unit (
     .clock  (clock),
     .reset  (reset),
@@ -582,20 +649,55 @@ module cpu_top #(
                               id_ex_is_fence_i ? (id_ex_pc + 32'd4) :
                                                  ex_correct_next_pc;
 
+  // Register BPU training at the EX/MEM boundary so the BPU array write is
+  // driven by flops instead of the forwarding/ALU cone.
+  reg        bpu_train_valid;
+  reg [31:0] bpu_train_pc;
+  reg [31:0] bpu_train_target;
+  reg        bpu_train_taken;
+  reg        bpu_train_is_call;
+  reg        bpu_train_is_ret;
+  reg        bpu_train_mispred;
+
+  wire bpu_capture = id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
+                     !mem_stall && !ex_mdu_stall;
+
+  always @(posedge clock) begin
+    if (reset) begin
+      bpu_train_valid   <= 1'b0;
+      bpu_train_pc      <= 32'b0;
+      bpu_train_target  <= 32'b0;
+      bpu_train_taken   <= 1'b0;
+      bpu_train_is_call <= 1'b0;
+      bpu_train_is_ret  <= 1'b0;
+      bpu_train_mispred <= 1'b0;
+    end else begin
+      bpu_train_valid <= bpu_capture;
+      if (bpu_capture) begin
+        bpu_train_pc      <= id_ex_pc;
+        bpu_train_target  <= ex_actual_target;
+        bpu_train_taken   <= ex_actual_taken;
+        bpu_train_is_call <= (id_ex_is_jal || id_ex_is_jalr) && (id_ex_rd == 5'd1);
+        bpu_train_is_ret  <= id_ex_is_jalr && (id_ex_rs1 == 5'd1);
+        bpu_train_mispred <= ex_mispredict;
+      end
+    end
+  end
+
   // Branch Prediction Unit
   bpu u_bpu (
     .clock            (clock),
     .reset            (reset),
-    .if_pc            (pc),
+    .if_pc            (if_id_pc),
     .pred_taken       (bpu_pred_taken),
     .pred_target      (bpu_pred_target),
-    .train_valid      (id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) && !mem_stall),
-    .train_pc         (id_ex_pc),
-    .train_taken      (ex_actual_taken),
-    .train_target     (ex_actual_target),
-    .train_is_call    ((id_ex_is_jal || id_ex_is_jalr) && (id_ex_rd == 5'd1)),
-    .train_is_ret     (id_ex_is_jalr && (id_ex_rs1 == 5'd1)),
-    .train_mispred    (ex_mispredict),
+    .train_valid      (bpu_train_valid),
+    .train_pc         (bpu_train_pc),
+    .train_taken      (bpu_train_taken),
+    .train_target     (bpu_train_target),
+    .train_is_call    (bpu_train_is_call),
+    .train_is_ret     (bpu_train_is_ret),
+    .train_mispred    (bpu_train_mispred),
     .total_pred_cnt   (bpu_total_pred_cnt),
     .correct_pred_cnt (bpu_correct_pred_cnt)
   );
@@ -639,6 +741,8 @@ module cpu_top #(
   reg        ex_mem_is_store;
   reg        ex_mem_is_ebreak;
   reg        ex_mem_is_fence_i;
+
+  assign fence_flush = ex_mem_valid && ex_mem_is_fence_i;
 
   // Writeback value is selected in EX and registered with EX/MEM, so the
   // forwarding path starts from a flop instead of a combinational mux.
@@ -882,11 +986,13 @@ module cpu_top #(
   ) u_icache (
     .clock          (clock),
     .reset          (reset),
-    .req_valid      (!reset),
-    .req_addr       (pc),
+    .req_valid      (fetch_start),
+    .req_addr       (fetch_pc),
+    .req_ready      (icache_req_ready),
     .resp_valid     (icache_resp_valid),
-    .resp_rdata     (icache_resp_rdata),
-    .flush          (ex_redirect),
+    .resp_line      (icache_resp_line),
+    .resp_word_sel  (icache_resp_word_sel),
+    .flush          (icache_flush),
     .fence_i        (ex_mem_valid && ex_mem_is_fence_i),
     .mem_req_ack    (icache_mem_req_ack),
     .mem_req_valid  (icache_mem_req_valid),
@@ -1197,7 +1303,7 @@ module cpu_top #(
   assign io_slave_rid     = 4'b0;
 
   // SimpleBus tie-offs
-  assign io_ifu_addr      = pc;
+  assign io_ifu_addr      = fetch_pc;
   assign io_ifu_reqValid  = 1'b0;
   assign io_lsu_addr      = ex_mem_alu_res;
   assign io_lsu_reqValid  = 1'b0;

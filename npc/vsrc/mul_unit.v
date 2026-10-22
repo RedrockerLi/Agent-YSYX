@@ -35,6 +35,7 @@ module mul_unit #(
   localparam [CW-1:0] LAST    = NITER_V[CW-1:0] - 1'b1;
 
   localparam S_IDLE   = 3'd0;
+  localparam S_CONV   = 3'd5;
   localparam S_ITER   = 3'd1;
   localparam S_FINAL  = 3'd2;
   localparam S_SELECT = 3'd3;
@@ -52,6 +53,8 @@ module mul_unit #(
   wire [31:0] b_mag_c = (b_signed && src2[31]) ? (~src2 + 32'd1) : src2;
 
   reg [2:0]    state;
+  reg [31:0]   a_raw, b_raw;
+  reg [4:0]    op_r;
   reg [31:0]   b1;
   reg [32:0]   b2;
   reg [33:0]   b3;
@@ -63,6 +66,13 @@ module mul_unit #(
   reg [AW-1:0] prod_r;
 
   assign done = done_r;
+
+  // Magnitudes are computed from the latched raw operands in S_CONV, so the
+  // forwarding mux and the 32-bit negate/add are not in the start-cycle path.
+  wire a_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH) || (op_r == OP_MULHSU);
+  wire b_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH);
+  wire [31:0] a_mag_s = (a_signed_r && a_raw[31]) ? (~a_raw + 32'd1) : a_raw;
+  wire [31:0] b_mag_s = (b_signed_r && b_raw[31]) ? (~b_raw + 32'd1) : b_raw;
 
   // Partial products for the current group of radix-4 digits.
   wire [1:0]  digit [0:DIGITS-1];
@@ -124,6 +134,9 @@ module mul_unit #(
       busy      <= 1'b0;
       done_r    <= 1'b0;
       res       <= 32'b0;
+      a_raw     <= 32'b0;
+      b_raw     <= 32'b0;
+      op_r      <= 5'b0;
       b1        <= 32'b0;
       b2        <= 33'b0;
       b3        <= 34'b0;
@@ -138,23 +151,30 @@ module mul_unit #(
       case (state)
         S_IDLE: begin
           if (start) begin
+            a_raw     <= src1;
+            b_raw     <= src2;
+            op_r      <= alu_op;
             neg_r     <= neg_c;
             high_r    <= high_c;
-            b1        <= b_mag_c;
-            b2        <= {1'b0, b_mag_c} << 1;
-            b3        <= ({2'b0, b_mag_c} << 1) + {2'b0, b_mag_c};
-            a_shift   <= a_mag_c;
             acc_sum   <= {AW{1'b0}};
             acc_carry <= {AW{1'b0}};
             iter      <= {CW{1'b0}};
             busy      <= 1'b1;
-            if ((a_mag_c == 32'b0) || (b_mag_c == 32'b0)) begin
-              res    <= 32'b0;
-              done_r <= 1'b1;
-              state  <= S_DONE;
-            end else begin
-              state  <= S_ITER;
-            end
+            state     <= S_CONV;
+          end
+        end
+
+        S_CONV: begin
+          b1        <= b_mag_s;
+          b2        <= {1'b0, b_mag_s} << 1;
+          b3        <= ({2'b0, b_mag_s} << 1) + {2'b0, b_mag_s};
+          a_shift   <= a_mag_s;
+          if ((a_mag_s == 32'b0) || (b_mag_s == 32'b0)) begin
+            res    <= 32'b0;
+            done_r <= 1'b1;
+            state  <= S_DONE;
+          end else begin
+            state  <= S_ITER;
           end
         end
 

@@ -42,8 +42,6 @@ docker run --rm -it --net=host -v "$PWD":/workspace ysyx
 
 ## 🔁 Iteration Path
 
-The repository develops in iterations. The focus is not scoring an agent's one-shot RTL generation, but exploring the boundary of agent capability through iterative development.
-
 Iterations alternate between one architecture optimization round and one frequency improvement round. The boundary is defined by what a change alters, not by its size.
 
 - **Architecture optimization round** — changes the processor's organization or features: pipeline depth and organization, forwarding and hazard handling, cache hierarchy and replacement policy, branch-prediction structure, bus/interconnect, and ISA or privilege support. The goal is higher IPC/CPI, fewer cycles, or better area and power at the same clock constraint; the round may not buy gains by relaxing functional correctness or timing constraints.
