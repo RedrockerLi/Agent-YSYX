@@ -124,13 +124,13 @@ module bpu #(
   assign lookup_taken3 = s1_valid && s1_hit[3] && (s1_is_ret[3] || s1_bht[3]);
 
   assign lookup_target0 = (s1_is_ret[0] && (ras_ptr != 3'd0)) ? ras_target :
-                          s1_hit[0] ? s1_target[0] : (s1_pc[0] + 32'd4);
+                          s1_hit[0] ? s1_target[0] : 32'b0;
   assign lookup_target1 = (s1_is_ret[1] && (ras_ptr != 3'd0)) ? ras_target :
-                          s1_hit[1] ? s1_target[1] : (s1_pc[1] + 32'd4);
+                          s1_hit[1] ? s1_target[1] : 32'b0;
   assign lookup_target2 = (s1_is_ret[2] && (ras_ptr != 3'd0)) ? ras_target :
-                          s1_hit[2] ? s1_target[2] : (s1_pc[2] + 32'd4);
+                          s1_hit[2] ? s1_target[2] : 32'b0;
   assign lookup_target3 = (s1_is_ret[3] && (ras_ptr != 3'd0)) ? ras_target :
-                          s1_hit[3] ? s1_target[3] : (s1_pc[3] + 32'd4);
+                          s1_hit[3] ? s1_target[3] : 32'b0;
 
   // Training & State Updates
   wire [INDEX_WIDTH-1:0] train_index = train_pc[INDEX_WIDTH+1 : 2];
