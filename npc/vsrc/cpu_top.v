@@ -568,12 +568,15 @@ module cpu_top #(
 
   // Multi-cycle MDU.  DIV and MUL instructions occupy EX until their unit
   // raises done; the result is captured by EX/MEM on the accept cycle.
-  assign div_start    = id_ex_valid && id_ex_is_div && !div_busy && !div_done;
+  assign div_start    = id_ex_valid && id_ex_is_div && !div_busy && !div_done &&
+                        !ex_redirect_r;
   assign div_accept   = div_done && !mem_stall;
-  assign mul_start    = id_ex_valid && id_ex_is_mul && !mul_busy && !mul_done;
+  assign mul_start    = id_ex_valid && id_ex_is_mul && !mul_busy && !mul_done &&
+                        !ex_redirect_r;
   assign mul_accept   = mul_done && !mem_stall;
-  assign ex_mdu_stall = (id_ex_valid && id_ex_is_div && !div_accept) ||
-                        (id_ex_valid && id_ex_is_mul && !mul_accept);
+  assign ex_mdu_stall = !ex_redirect_r &&
+                        ((id_ex_valid && id_ex_is_div && !div_accept) ||
+                         (id_ex_valid && id_ex_is_mul && !mul_accept));
 
   div_unit #(
     .DIV_BITS_PER_CYCLE (1)
@@ -643,7 +646,7 @@ module cpu_top #(
     .csr_addr   (id_ex_csr_addr),
     .csr_op     (id_ex_csr_op),
     .csr_wdata  (id_ex_funct3[2] ? id_ex_imm : ex_src1),
-    .csr_wen    (id_ex_valid && id_ex_is_csr && !mem_stall),
+    .csr_wen    (id_ex_valid && id_ex_is_csr && !mem_stall && !ex_redirect_r),
     .csr_rdata  (csr_rdata),
     .is_ecall   (id_ex_valid && id_ex_is_ecall && !mem_stall),
     .is_mret    (id_ex_valid && id_ex_is_mret && !mem_stall),
@@ -653,12 +656,32 @@ module cpu_top #(
   );
 
   // Exception / Branch Redirection
-  assign ex_redirect = !mem_stall && !ex_mdu_stall && id_ex_valid && (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
+  // Register the EX redirect before it enters the fetch unit.  The redirect
+  // cycle's younger instruction is killed by ex_redirect_r on the next cycle.
+  reg        ex_redirect_r;
+  reg [31:0] ex_redirect_target_r;
+  assign ex_redirect        = ex_redirect_r;
+  assign ex_redirect_target = ex_redirect_target_r;
 
-  assign ex_redirect_target = id_ex_is_ecall   ? mtvec :
-                              id_ex_is_mret    ? mepc :
-                              id_ex_is_fence_i ? (id_ex_pc + 32'd4) :
-                                                 ex_correct_next_pc;
+  wire ex_redirect_now = !mem_stall && !ex_mdu_stall && !ex_redirect_r && !fence_flush &&
+                         id_ex_valid &&
+                         (id_ex_is_ecall || id_ex_is_mret || id_ex_is_fence_i || ex_mispredict);
+
+  wire [31:0] ex_redirect_target_now = id_ex_is_ecall   ? mtvec :
+                                       id_ex_is_mret    ? mepc :
+                                       id_ex_is_fence_i ? (id_ex_pc + 32'd4) :
+                                                          ex_correct_next_pc;
+
+  always @(posedge clock) begin
+    if (reset) begin
+      ex_redirect_r        <= 1'b0;
+      ex_redirect_target_r <= 32'b0;
+    end else begin
+      ex_redirect_r <= ex_redirect_now;
+      if (ex_redirect_now)
+        ex_redirect_target_r <= ex_redirect_target_now;
+    end
+  end
 
   // Register BPU training at the EX/MEM boundary so the BPU array write is
   // driven by flops instead of the forwarding/ALU cone.
@@ -671,7 +694,7 @@ module cpu_top #(
   reg        bpu_train_mispred;
 
   wire bpu_capture = id_ex_valid && (id_ex_is_branch || id_ex_is_jal || id_ex_is_jalr) &&
-                     !mem_stall && !ex_mdu_stall;
+                     !mem_stall && !ex_mdu_stall && !ex_redirect_r;
 
   always @(posedge clock) begin
     if (reset) begin
@@ -783,8 +806,9 @@ module cpu_top #(
       ex_mem_is_fence_i  <= 1'b0;
     end else if (mem_stall) begin
       // Hold the older memory instruction in MEM.
-    end else if (ex_mdu_stall) begin
-      // Bubble the MDU instruction out of EX until done/accept.
+    end else if (ex_redirect_r || ex_mdu_stall) begin
+      // Kill the younger instruction in EX; the redirecting instruction
+      // already in EX/MEM advances to MEM/WB on this edge.
       ex_mem_valid       <= 1'b0;
       ex_mem_rd          <= 5'd0;
       ex_mem_alu_res     <= 32'b0;
