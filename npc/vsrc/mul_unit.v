@@ -36,6 +36,7 @@ module mul_unit #(
 
   localparam S_IDLE   = 3'd0;
   localparam S_CONV   = 3'd5;
+  localparam S_MULT   = 3'd7;
   localparam S_ITER   = 3'd1;
   localparam S_FINAL  = 3'd2;
   localparam S_NEG    = 3'd6;
@@ -56,6 +57,7 @@ module mul_unit #(
   reg [2:0]    state;
   reg [31:0]   a_raw, b_raw;
   reg [4:0]    op_r;
+  reg [31:0]   a_mag_r, b_mag_r;
   reg [31:0]   b1;
   reg [32:0]   b2;
   reg [33:0]   b3;
@@ -139,6 +141,8 @@ module mul_unit #(
       a_raw     <= 32'b0;
       b_raw     <= 32'b0;
       op_r      <= 5'b0;
+      a_mag_r   <= 32'b0;
+      b_mag_r   <= 32'b0;
       b1        <= 32'b0;
       b2        <= 33'b0;
       b3        <= 34'b0;
@@ -168,11 +172,19 @@ module mul_unit #(
         end
 
         S_CONV: begin
-          b1        <= b_mag_s;
-          b2        <= {1'b0, b_mag_s} << 1;
-          b3        <= ({2'b0, b_mag_s} << 1) + {2'b0, b_mag_s};
-          a_shift   <= a_mag_s;
-          if ((a_mag_s == 32'b0) || (b_mag_s == 32'b0)) begin
+          // Register the magnitudes first; the multiple generation runs from
+          // these flops in the next cycle.
+          a_mag_r <= a_mag_s;
+          b_mag_r <= b_mag_s;
+          b1      <= b_mag_s;
+          state   <= S_MULT;
+        end
+
+        S_MULT: begin
+          b2      <= {1'b0, b1} << 1;
+          b3      <= ({2'b0, b1} << 1) + {2'b0, b1};
+          a_shift <= a_mag_r;
+          if ((a_mag_r == 32'b0) || (b_mag_r == 32'b0)) begin
             res    <= 32'b0;
             done_r <= 1'b1;
             state  <= S_DONE;

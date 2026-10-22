@@ -68,22 +68,40 @@ module div_unit #(
   reg [PW:0]   diff_r;
   integer      i;
 
+  // Radix-2 fast path: one carry-select subtractor instead of a synthesised
+  // 33-bit ripple subtract.
+  wire [32:0] div_a33    = {rem[31:0], dividend[31]};
+  wire [32:0] div_diff33;
+  wire        div_ge33;
+  sub33 u_sub33 (
+    .a  (div_a33),
+    .b  (b_mag),
+    .d  (div_diff33),
+    .ge (div_ge33)
+  );
+
   always @(*) begin
-    rem_t  = rem;
-    quot_t = quot;
-    div_t  = dividend;
-    b_ext_r = {{(PW + 1 - 32){1'b0}}, b_mag};
-    for (i = 0; i < K; i = i + 1) begin
-      shifted_r = {rem_t, div_t[31]};
-      diff_r    = shifted_r - b_ext_r;
-      if (shifted_r >= b_ext_r) begin
-        rem_t  = diff_r[PW-1:0];
-        quot_t = {quot_t[30:0], 1'b1};
-      end else begin
-        rem_t  = shifted_r[PW-1:0];
-        quot_t = {quot_t[30:0], 1'b0};
+    rem_t   = rem;
+    quot_t  = quot;
+    div_t   = dividend;
+    if (K == 1) begin
+      rem_t  = div_ge33 ? div_diff33 : div_a33;
+      quot_t = {quot[30:0], div_ge33};
+      div_t  = dividend << 1;
+    end else begin
+      b_ext_r = {{(PW + 1 - 32){1'b0}}, b_mag};
+      for (i = 0; i < K; i = i + 1) begin
+        shifted_r = {rem_t, div_t[31]};
+        diff_r    = shifted_r - b_ext_r;
+        if (shifted_r >= b_ext_r) begin
+          rem_t  = diff_r[PW-1:0];
+          quot_t = {quot_t[30:0], 1'b1};
+        end else begin
+          rem_t  = shifted_r[PW-1:0];
+          quot_t = {quot_t[30:0], 1'b0};
+        end
+        div_t = div_t << 1;
       end
-      div_t = div_t << 1;
     end
   end
 
