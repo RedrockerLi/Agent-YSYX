@@ -200,6 +200,7 @@ flowchart LR
 |---|---|---|
 | `make synth`（等价 `make pnr-synth`） | Yosys 综合 + 后综合 iSTA，输出 QoR 报告 | 否 |
 | `make pnr [BACKEND_FREQ_MHZ=<n>] [WORKSPACE=<ws>]` | 一键执行 RTL-to-GDSII 全流程，结束后导出签核包；参数与已生成的工程配置不一致时报错 | 签核产物 |
+| `make pnr-status [WORKSPACE=<ws>]` | 每 5 秒刷新并显示各后端步骤的当前状态 | — |
 | `make pnr-<step>` | 单步执行：`floorplan`、`place`、`cts`、`legalize`、`opt`、`route`、`filler`、`rcx`、`sta`、`lvs`、`drc`、`harden` | 视步骤而定 |
 | `make signoff` | 导出 GDSII、LEF、DEF、SDF、网表与报告 | 签核产物 |
 | `make sta-fast [FREQ_MHZ=<n>]` | 快速综合 + 后综合 STA，面向 RTL 迭代 | 否 |

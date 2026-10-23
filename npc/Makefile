@@ -248,13 +248,20 @@ pnr: $(BACKEND_DIR)/project.json
 	-$(MAKE) signoff
 	@echo ">>> Full physical design flow completed successfully."
 
+# Physical-design progress: refresh the step states every 5 seconds.
+PNR_FLOW = $(BACKEND_DIR)/$(WORKSPACE)/home/flow.json
+
+pnr-status:
+	@test -f $(PNR_FLOW) || { echo "no flow state yet: $(PNR_FLOW)"; exit 1; }
+	@watch -n 5 'python3 -c "import json; d=json.load(open(\"$(PNR_FLOW)\")); print(\"\\n\".join(\"%-22s %s\" % (s[\"name\"], s[\"state\"]) for s in d[\"steps\"]))"'
+
 clean:
 	rm -rf $(BUILD_DIR)
 
 .PHONY: default sim run sim-vpi sim-iverilog run-iverilog \
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
-        pnr-harden pnr signoff sim-netlist-iv run-netlist-iv clean
+        pnr-harden pnr pnr-status signoff sim-netlist-iv run-netlist-iv clean
 
 # ==============================================================================
 # 6. Fast STA (additive; does not touch the full backend flow)

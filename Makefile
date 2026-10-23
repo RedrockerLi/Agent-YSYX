@@ -38,6 +38,7 @@ help:
 	@echo "    make synth / pnr-synth: Run logic synthesis and PPA report (SMIC 55nm)"
 	@echo "    make pnr           : Run full backend P&R flow (RTL-to-GDSII)"
 	@echo "    make pnr-<step>    : Run step (floorplan, place, cts, legalize, opt, route, filler, rcx, sta, lvs, drc, harden)"
+	@echo "    make pnr-status    : Refresh physical-design step states every 5s (WORKSPACE=<ws>)"
 	@echo "    make test-netlist  : Run gate-level netlist simulation"
 	@echo "    make signoff       : Export signoff package (GDSII, DEF, SDF, reports)"
 	@echo ""
@@ -108,6 +109,9 @@ WORKSPACE ?= default
 pnr:
 	$(MAKE) -C npc pnr
 
+pnr-status:
+	$(MAKE) -C npc pnr-status WORKSPACE=$(WORKSPACE)
+
 pnr-floorplan:
 	$(MAKE) -C npc pnr-floorplan
 
@@ -166,7 +170,7 @@ clean:
         bench bench-coremark bench-dhrystone bench-micro \
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
-        pnr-harden pnr signoff test-netlist clean
+        pnr-harden pnr pnr-status signoff test-netlist clean
 
 # ------------------------------------------------------------------------------
 # 5. Fast STA (additive; existing physical-design targets are unchanged)
