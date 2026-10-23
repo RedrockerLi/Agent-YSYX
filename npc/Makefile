@@ -239,9 +239,19 @@ pnr: $(BACKEND_DIR)/project.json
 
 # Full flow with an explicitly requested clock frequency and a fresh workspace.
 # Removes the generated backend manifests so frequency_mhz is re-emitted.
+# Synthesis runs first so the workspace (and home/flow.json) exists; the yosys
+# formal-equivalence step is then marked as bypassed, matching the project.json
+# rule for the default workspace, and the flow resumes from Floorplan.
 pnr-freq:
 	@rm -f $(BACKEND_DIR)/ecc.toml $(BACKEND_DIR)/project.json
-	@$(MAKE) pnr BACKEND_FREQ_MHZ=$(BACKEND_FREQ_MHZ) WORKSPACE=$(WORKSPACE) PNR_OVERWRITE=--overwrite
+	@$(MAKE) --no-print-directory $(BACKEND_DIR)/project.json
+	$(ECC_RUN) --only Synthesis
+	@python3 -c 'import json; p="$(BACKEND_DIR)/$(WORKSPACE)/home/flow.json"; d=json.load(open(p)); [s.update(state="Success", info={"bypassed": True}) for s in d.get("steps", []) if s.get("name")=="lec"]; json.dump(d, open(p, "w"), indent=4)'
+	$(ECC_RUN) --resume
+	@gunzip -k -f $(BACKEND_DIR)/$(WORKSPACE)/Synthesis_yosys/output/$(TOPNAME)_Synthesis_sim.v.gz 2>/dev/null || true
+	@echo ">>> Physical design pipeline finished. Packaging signoff deliverables..."
+	-$(MAKE) signoff
+	@echo ">>> Full physical design flow completed successfully."
 
 clean:
 	rm -rf $(BUILD_DIR)

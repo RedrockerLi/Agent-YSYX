@@ -1,6 +1,6 @@
 # RISC-V 处理器架构设计与基准测试基线报告 (Baseline Report)
 
-本文档详细记录了自主研发的 5 级流水线 RISC-V 处理器核 **`cpu_top`**（基线版本 `v1.0.0`）的整体微架构规格、存储与缓存体系、外设总线互联接口、系统软件支持、各项经典基准测试（Benchmark）的实测性能基线数据，以及该设计在 55nm 工艺下的综合、门级仿真与后端物理实现结果。
+本文档详细记录了自主研发的 5 级流水线 RISC-V 处理器核 **`cpu_top`**（基线版本 `v1.0.0`）的整体微架构规格、存储与缓存体系、外设总线互联接口、各项经典基准测试（Benchmark）的实测性能基线数据，以及该设计在 55nm 工艺下的综合、门级仿真与后端物理实现结果。
 
 ---
 
@@ -16,27 +16,20 @@
   - [2.2 数据高速缓存 (DCache)](#22-数据高速缓存-dcache)
   - [2.3 缓存一致性与 fence.i](#23-缓存一致性与-fencei)
   - [2.4 总线仲裁器与 AXI4 突发传输](#24-总线仲裁器与-axi4-突发传输)
-- [三、系统软件与运行环境 (Software & OS Support)](#三系统软件与运行环境-software--os-support)
-  - [3.1 NEMU 黄金参考模型与 DiffTest 差分框架](#31-nemu-黄金参考模型与-difftest-差分框架)
-  - [3.2 抽象机 AM 与运行库 klib](#32-抽象机-am-与运行库-klib)
-  - [3.3 简易操作系统 Nanos-lite 与用户程序 Navy-apps](#33-简易操作系统-nanos-lite-与用户程序-navy-apps)
-  - [3.4 多任务协程与线程调度操作系统 (Thread-OS / Yield-OS)](#34-多任务协程与线程调度操作系统-thread-os--yield-os)
-- [四、基准测试实测性能数据 (Baseline Benchmark Results)](#四基准测试实测性能数据-baseline-benchmark-results)
-  - [4.1 测试总览与性能汇总表](#41-测试总览与性能汇总表)
-  - [4.2 CoreMark 综合跑分测试](#42-coremark-综合跑分测试)
-  - [4.3 Dhrystone 经典算力测试](#43-dhrystone-经典算力测试)
-  - [4.4 MicroBench 经典算法套件测试](#44-microbench-经典算法套件测试)
-  - [4.5 Thread-OS 多任务上下文切换测试](#45-thread-os-多任务上下文切换测试)
-  - [4.6 Nanos-lite 操作系统运行 Navy-apps 测试](#46-nanos-lite-操作系统运行-navy-apps-测试)
-  - [4.7 cpu-tests 指令全集单元测试 (35/35)](#47-cpu-tests-指令全集单元测试-3535)
-- [五、芯片物理实现与后端验证基线 (Physical Design & Silicon Verification)](#五芯片物理实现与后端验证基线-physical-design--silicon-verification)
-  - [5.1 四值仿真与 X 态排查 (4-State Simulation & X-State Analysis)](#51-四值仿真与-x-态排查-4-state-simulation--x-state-analysis)
-  - [5.2 ICsprout55 逻辑综合与 PPA 评估 (ASIC Synthesis & PPA Metrics)](#52-icsprout55-逻辑综合与-ppa-评估-asic-synthesis--ppa-metrics)
-  - [5.3 门级网表仿真 (Gate-Level Netlist Simulation)](#53-门级网表仿真-gate-level-netlist-simulation)
-  - [5.4 后端物理设计自动布局布线 (Physical Design P&R Flow)](#54-后端物理设计自动布局布线-physical-design-pr-flow)
-- [六、源码结构与关键模块索引](#六源码结构与关键模块索引)
-
-> EDA 工具链、PDK 版本与物理设计流程入口见 [工具链与物理设计环境](../toolchain/baseline.md)；第五章记录的是本设计的实测结果。
+- [三、基准测试实测性能数据 (Baseline Benchmark Results)](#三基准测试实测性能数据-baseline-benchmark-results)
+  - [3.1 测试总览与性能汇总表](#31-测试总览与性能汇总表)
+  - [3.2 CoreMark 综合跑分测试](#32-coremark-综合跑分测试)
+  - [3.3 Dhrystone 经典算力测试](#33-dhrystone-经典算力测试)
+  - [3.4 MicroBench 经典算法套件测试](#34-microbench-经典算法套件测试)
+  - [3.5 Thread-OS 多任务上下文切换测试](#35-thread-os-多任务上下文切换测试)
+  - [3.6 Nanos-lite 操作系统运行 Navy-apps 测试](#36-nanos-lite-操作系统运行-navy-apps-测试)
+  - [3.7 cpu-tests 指令全集单元测试 (35/35)](#37-cpu-tests-指令全集单元测试-3535)
+- [四、芯片物理实现与后端验证基线 (Physical Design & Silicon Verification)](#四芯片物理实现与后端验证基线-physical-design--silicon-verification)
+  - [4.1 四值仿真与 X 态排查 (4-State Simulation & X-State Analysis)](#41-四值仿真与-x-态排查-4-state-simulation--x-state-analysis)
+  - [4.2 ICsprout55 逻辑综合与 PPA 评估 (ASIC Synthesis & PPA Metrics)](#42-icsprout55-逻辑综合与-ppa-评估-asic-synthesis--ppa-metrics)
+  - [4.3 门级网表仿真 (Gate-Level Netlist Simulation)](#43-门级网表仿真-gate-level-netlist-simulation)
+  - [4.4 后端物理设计自动布局布线 (Physical Design P&R Flow)](#44-后端物理设计自动布局布线-physical-design-pr-flow)
+- [五、源码结构与关键模块索引](#五源码结构与关键模块索引)
 
 ---
 
@@ -193,47 +186,27 @@ flowchart TD
 
 ---
 
-## 三、系统软件与运行环境 (Software & OS Support)
-
-### 3.1 NEMU 黄金参考模型与 DiffTest 差分框架
-- 搭建基于 NEMU 共享库的 **周期级差分测试 (DiffTest)** 环境。
-- NPC 在每条指令提交（Commit）时刻，通过 DPI-C 导出当前寄存器状态，比对 NEMU 的 GPR 与 PC。
-- **日志静默与高效仿真优化**：优化 DiffTest 内部日志机制（`g_difftest_ref_mode`），屏蔽日常无错打印，使得每秒仿真吞吐率高达 **150 万条指令**，同时发生错误时即刻唤醒 `iringbuf` 打印最近 16 条指令及软硬件全寄存器差异。
-- **波形策略**：遵照 SSD 寿命保护要求，默认全面禁用波形生成（`--trace` / `--trace-fst` 关闭）。
-
-### 3.2 抽象机 AM 与运行库 klib
-- 编写完整的 AM 架构支持库，适配 `riscv32e-npc`、`riscv32-nemu` 与 `native` 目标平台。
-- 完整实现 C 运行库 `klib`（`string.h`, `stdio.h` 中含 `sprintf`/`printf`，`int64.c` 64位运算模拟）。
-
-### 3.3 简易操作系统 Nanos-lite 与用户程序 Navy-apps
-- 运行 Nanos-lite 简易操作系统，实现了基于 CTE 的系统调用分发层（`SYS_yield`, `SYS_exit`, `SYS_write`, `SYS_read`, `SYS_open`, `SYS_close`, `SYS_lseek`, `SYS_brk`）。
-- 构建 VFS 虚拟文件系统，支持对只读 ramdisk 镜像文件的定位、打开与加载。
-- 成功加载运行 Navy-apps 用户空间 ELF 应用程序：`/bin/hello` 与 `/bin/dummy`。
-
-### 3.4 多任务协程与线程调度操作系统 (Thread-OS / Yield-OS)
-- 支持 AM 多任务上下文切换，在硬件定时器或软件主动 `yield()` 自陷时保存 Callee-saved 寄存器现场，重定位栈顶并完成跨任务线程切换。
-
----
-
-## 四、基准测试实测性能数据 (Baseline Benchmark Results)
+## 三、基准测试实测性能数据 (Baseline Benchmark Results)
 
 > **说明**：遵照开发与验证规范，所有基准测试、仿真验证与后端 EDA 流程均在 Docker 容器内运行。下文中记录的运行命令均为在 Docker 容器工程根目录下直接执行的命令。
 
-### 4.1 测试总览与性能汇总表
+### 3.1 测试总览与性能汇总表
 
-| 测试用例 (Benchmark) | 运行规模 / 参数 | 验证状态 | 总周期数 (Cycles) | 总指令数 (Insts) | 平均 IPC | ICache 命中率 | DCache 命中率 | 分支预测准确率 (BPU) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **CoreMark** | 10 iterations | **PASS** | 9,230,747 | 7,834,824 | **0.8488** | **99.87%** | **99.92%** | **78.16%** |
-| **Dhrystone** | 5,000 runs | **PASS** | 2,950,705 | 2,515,768 | **0.8526** | **99.99%** | **96.71%** | **93.11%** |
-| **MicroBench** | `test` 算法集 (10项) | **PASS** | 675,599 | 525,429 | **0.7777** | **99.64%** | **94.74%** | **81.68%** |
-| **Nanos-lite (`/bin/hello`)** | OS 启动 + 加载用户程序 | **PASS** | 324,164 | 251,815 | **0.7768** | **99.40%** | **96.22%** | **90.34%** |
-| **Nanos-lite (`/bin/dummy`)** | OS 启动 + 基础自测 | **PASS** | 249,545 | 196,892 | **0.7890** | **99.59%** | **95.69%** | **88.10%** |
-| **Thread-OS** | 20 次线程上下文切换 | **PASS** | 169,158 | 117,959 | **0.6973** | **99.47%** | **99.45%** | **95.03%** |
-| **cpu-tests (35 项全集)** | 完整 RV32 基础指令算法 | **35/35 全通** | — | — | **~0.75 - 0.93** | **> 98.5%** | **> 92.0%** | **~70% - 95%** |
+| 测试用例 (Benchmark) | 运行规模 / 参数 | 验证状态 | 总周期数 (Cycles) | 总指令数 (Insts) | 平均 IPC | 运行时间 | ICache 命中率 | DCache 命中率 | 分支预测准确率 (BPU) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **CoreMark** | 10 iterations | **PASS** | 9,230,747 | 7,834,824 | **0.8488** | **214.7 ms** | **99.87%** | **99.92%** | **78.16%** |
+| **Dhrystone** | 5,000 runs | **PASS** | 2,950,705 | 2,515,768 | **0.8526** | **68.6 ms** | **99.99%** | **96.71%** | **93.11%** |
+| **MicroBench** | `test` 算法集 (10项) | **PASS** | 675,599 | 525,429 | **0.7777** | **15.7 ms** | **99.64%** | **94.74%** | **81.68%** |
+| **Nanos-lite (`/bin/hello`)** | OS 启动 + 加载用户程序 | **PASS** | 324,164 | 251,815 | **0.7768** | **7.5 ms** | **99.40%** | **96.22%** | **90.34%** |
+| **Nanos-lite (`/bin/dummy`)** | OS 启动 + 基础自测 | **PASS** | 249,545 | 196,892 | **0.7890** | **5.8 ms** | **99.59%** | **95.69%** | **88.10%** |
+| **Thread-OS** | 20 次线程上下文切换 | **PASS** | 169,158 | 117,959 | **0.6973** | **3.9 ms** | **99.47%** | **99.45%** | **95.03%** |
+| **cpu-tests** | 完整 RV32 基础指令算法 | **35/35 全通** | — | — | **~0.75 - 0.93** | — | **> 98.5%** | **> 92.0%** | **~70% - 95%** |
+
+> **运行时间计算**：运行时间 = 总周期数 ÷ 工作频率，工作频率取后布线 TT、1.20 V、25 ℃ 角按 WNS 反推的最高频率 **43 MHz**（见 4.4 节）。SS、1.08 V、125 ℃ 角为 **22 MHz**，对应运行时间约为表中数值的 **1.95 倍**。
 
 ---
 
-### 4.2 CoreMark 综合跑分测试
+### 3.2 CoreMark 综合跑分测试
 
 - **测试目标**：业界权威的嵌入式 CPU 整数流水线性能基准测试。
 - **运行命令**：
@@ -268,10 +241,11 @@ flowchart TD
   [npc] Simulated 7834825 instructions in 9230748 cycles (5293492 us)
   ```
 - **核心结论**：在高达 7.83 百万条指令的长时运行中，两路组相联 ICache 与 DCache 均维持了 **99.8%+** 的命中率，硬件流水线实现 **0.8488** 的高 IPC。
+- **运行时间**：9,230,747 cycles ÷ 43 MHz ≈ **214.7 ms**。
 
 ---
 
-### 4.3 Dhrystone 经典算力测试
+### 3.3 Dhrystone 经典算力测试
 
 - **测试目标**：经典整数算力性能基准测试。
 - **运行命令**：
@@ -299,10 +273,11 @@ flowchart TD
   [npc] Simulated 2515769 instructions in 2950706 cycles (1698346 us)
   ```
 - **核心结论**：分支预测器在循环密集的 Dhrystone 中发挥了优异性能，准确率达 **93.11%**，整体 IPC 达到 **0.8526**。
+- **运行时间**：2,950,705 cycles ÷ 43 MHz ≈ **68.6 ms**。
 
 ---
 
-### 4.4 MicroBench 经典算法套件测试
+### 3.4 MicroBench 经典算法套件测试
 
 - **测试目标**：测试处理器对 10 种不同典型算法场景的计算与访存适应能力。
 - **涵盖算法**：
@@ -345,10 +320,11 @@ flowchart TD
   Branch Prediction  : 101057 / 123724, Accuracy: 81.68%
   ========================================================
   ```
+- **运行时间**：675,599 cycles ÷ 43 MHz ≈ **15.7 ms**。
 
 ---
 
-### 4.5 Thread-OS 多任务上下文切换测试
+### 3.5 Thread-OS 多任务上下文切换测试
 
 - **测试目标**：评估处理器在密集 CTE 异常自陷与跨线程寄存器保存/恢复时的稳定性与缓存效率。
 - **运行命令**：
@@ -375,10 +351,11 @@ flowchart TD
   Branch Prediction  : 22984 / 24185, Accuracy: 95.03%
   ========================================================
   ```
+- **运行时间**：169,158 cycles ÷ 43 MHz ≈ **3.9 ms**。
 
 ---
 
-### 4.6 Nanos-lite 操作系统运行 Navy-apps 测试
+### 3.6 Nanos-lite 操作系统运行 Navy-apps 测试
 
 - **测试目标**：验证操作系统内核初始化、VFS 虚拟文件系统解析 ramdisk、ELF 用户程序加载器（Loader）、`fence.i` 缓存一致性冲刷、用户态系统调用处理。
 - **运行命令**：
@@ -405,6 +382,7 @@ flowchart TD
   Branch Prediction  : 50901 / 56341, Accuracy: 90.34%
   ========================================================
   ```
+- **运行时间 (`/bin/hello`)**：324,164 cycles ÷ 43 MHz ≈ **7.5 ms**。
 - **执行输出 (`/bin/dummy`)**：
   ```text
   [npc] DiffTest enabled with reference: riscv32-nemu-interpreter-so
@@ -419,10 +397,11 @@ flowchart TD
   Branch Prediction  : 36155 / 41040, Accuracy: 88.10%
   ========================================================
   ```
+- **运行时间 (`/bin/dummy`)**：249,545 cycles ÷ 43 MHz ≈ **5.8 ms**。
 
 ---
 
-### 4.7 cpu-tests 指令全集单元测试 (35/35)
+### 3.7 cpu-tests 指令全集单元测试 (35/35)
 
 - **测试目标**：验证 RV32E 基础整数指令集与乘除法扩展在流水线与数据前递网络中的功能正确性。
 - **运行命令**：
@@ -442,11 +421,11 @@ flowchart TD
 
 ---
 
-## 五、芯片物理实现与后端验证基线 (Physical Design & Silicon Verification)
+## 四、芯片物理实现与后端验证基线 (Physical Design & Silicon Verification)
 
-本章记录 `cpu_top` v1.0.0 在 ICsprout55 55nm 工艺下的四值仿真、逻辑综合、门级网表仿真与后端 P&R 实测数据。工具链版本与流程入口见 [工具链与物理设计环境](../toolchain/baseline.md)。
+本章记录 `cpu_top` v1.0.0 在 ICsprout55 55nm 工艺下的四值仿真、逻辑综合、门级网表仿真与后端 P&R 实测数据。
 
-### 5.1 四值仿真与 X 态排查 (4-State Simulation & X-State Analysis)
+### 4.1 四值仿真与 X 态排查 (4-State Simulation & X-State Analysis)
 
 - **验证目标与背景**：
   传统 Verilator 快速仿真采用二值逻辑（0 与 1），无法捕获硬件上电、未复位寄存器或悬空总线可能产生的“不定态 (X)”与“高阻态 (Z)”。若 X 态扩散至控制逻辑或有限状态机（FSM），将直接引发芯片流片死锁。依照芯片物理实现与验证规范要求，搭建了标准四值仿真器（Icarus Verilog）与 VPI 仿真环境，全量排查 X 态传播。
@@ -474,7 +453,7 @@ flowchart TD
 
 ---
 
-### 5.2 ICsprout55 逻辑综合与 PPA 评估 (ASIC Synthesis & PPA Metrics)
+### 4.2 ICsprout55 逻辑综合与 PPA 评估 (ASIC Synthesis & PPA Metrics)
 
 - **工艺节点与条件**：
   - **工艺库 (PDK)**：中芯国际官方 55nm 工艺（`icsprout55-pdk`，标准单元库 `ics55_LLSC_H7C`）。
@@ -501,7 +480,7 @@ flowchart TD
 
 ---
 
-### 5.3 门级网表仿真 (Gate-Level Netlist Simulation)
+### 4.3 门级网表仿真 (Gate-Level Netlist Simulation)
 
 - **验证目标**：
   逻辑综合将抽象 RTL 描述转换为了工艺库特定的基础逻辑门与触发器单元互联网表。门级网表仿真通过将真实工艺标准单元行为模型挂载到网表上，验证 Yosys 综合映射过程是否引入任何逻辑功能失真或综合漏洞。
@@ -524,7 +503,7 @@ flowchart TD
 
 ---
 
-### 5.4 后端物理设计自动布局布线 (Physical Design P&R Flow)
+### 4.4 后端物理设计自动布局布线 (Physical Design P&R Flow)
 
 - **物理设计环境**：
   基于工业级 ECC 物理实现流程，对接中芯国际 55nm 金属互连技术文件（`N551P6M_ecos.lef`，1P6M 6层金属工艺）与标准单元 LEF（`ics55_LLSC_H7CL.lef`, `ics55_LLSC_H7CR.lef`）。
@@ -600,7 +579,7 @@ flowchart TD
 
 ---
 
-## 六、源码结构与关键模块索引
+## 五、源码结构与关键模块索引
 
 | 模块类别 | 文件路径 | 功能说明 |
 | :--- | :--- | :--- |

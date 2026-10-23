@@ -65,13 +65,10 @@ npc/build/backend_fast/fast/Synthesis_yosys/feature/post_synthesis/timing_paths.
 | `elapsed_s` | 本次运行总耗时（含综合） |
 | `report` / `feature` | 报告路径，优先写相对仓库根目录的路径 |
 
-## 实测（本机 Docker，100MHz）
+## 运行开销
 
-- 总耗时约 25min（本机实测 `elapsed_s=1461–1502`，含综合；STA 本身远小于此）。
-- STA 阶段实测 ECC 进程 RSS 约 20GB（`flow.json` 记录的 Synthesis peak memory 约 1.6GB）；建议在 30GB 内存的机器上单独运行，避免与其他大内存任务并发。
-- 综合后 SS 角：WNS **-24.255ns**、TNS **-2180.2ns**、Fmax 估计 **29MHz**、hold WNS **+0.213ns**、NVP 509。
-- 最差路径：`ex_mem_is_jal_jalr_reg_p:Q -> io_lsu_addr[30]_reg_p:D`，slack -24.255ns，259 个组合单元级。
-- 这些数值与 [CPU 基线报告 5.2 节](../cpu/baseline.md#52-icsprout55-逻辑综合与-ppa-评估-asic-synthesis--ppa-metrics)中记录的综合后 SS 角数据一致。
+- 总耗时约 25min（`elapsed_s=1461–1502`，含综合；STA 本身远小于此）。
+- STA 阶段 ECC 进程 RSS 约 20GB（`flow.json` 记录的 Synthesis peak memory 约 1.6GB）；建议在 30GB 内存的机器上单独运行，避免与其他大内存任务并发。
 
 ## 限制
 
@@ -95,4 +92,4 @@ find npc/build/backend_fast/fast -maxdepth 1 -type d | sort
 grep -n "create_clock\|clk_period" npc/build/backend_fast/fast/origin/cpu_top.sdc
 ```
 
-同 RTL/PDK/ECC 版本、100MHz 约束下，后综合 SS 角的 WNS 应接近 `-24.255ns`、TNS 接近 `-2180.2ns`；偏差大时先检查 `origin_mismatch`、`frequency_mhz` 和 ECC/PDK 版本。
+运行结束后先检查 `manifest.json`：`origin_mismatch` 应为 false（确认 STA 读取的是工作区中的当前 RTL），`frequency_mhz` 应与命令传入的频率一致，`report`/`feature` 指向的文件应存在。时序结果本身不作固定阈值判定，由使用方在同一流程下的多次运行之间横向比较。

@@ -1,3 +1,7 @@
 # Agent Instructions
 
 - Run all experiments, builds, simulations, tests, and benchmarks inside Docker containers. Do not execute these tasks directly on the host machine. Routine development activities, including file editing and Git operations, may be performed on the host machine.
+- The `doc/cpu` folder records CPU architecture information and measured performance only, following the structure of `doc/cpu/000_baseline.md` (intro, table of contents, numbered chapters and subsections). It covers the microarchitecture, the memory hierarchy and the measured benchmark, timing and PPA results. Each iteration adds a document that describes the architecture as it currently stands and its measured performance.
+- The `doc/toolchain` folder records the EDA toolchain and the verification and software environment only, following the structure of `doc/toolchain/000_baseline.md`. It covers the Docker image, tool versions, the synthesis/STA/physical-design flow, command entry points, and the simulators, reference model, AM/runtime and OS workloads used for verification, together with how to use them. Each iteration adds a document that describes the tool or flow and how to use it.
+- `doc/cpu` and `doc/toolchain` evolve independently. Each document is self-contained: do not cite the other folder's documents or restate their content and data.
+- The only criterion for performance is the time a program takes to run; when comparing performance changes, compute the actual runtime from cycle counts and frequency.
