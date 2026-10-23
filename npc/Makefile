@@ -230,24 +230,19 @@ signoff:
 PNR_OVERWRITE ?=
 
 pnr: $(BACKEND_DIR)/project.json
+	@f=$$(awk -F' *= *' '/^frequency_mhz[[:space:]]*=/{print $$2; exit}' $(BACKEND_DIR)/ecc.toml 2>/dev/null); \
+	if [ -n "$$f" ] && ! awk -v a="$$f" -v b="$(BACKEND_FREQ_MHZ)" 'BEGIN{exit !(a+0==b+0)}'; then \
+		echo "ERROR: $(BACKEND_DIR)/ecc.toml has frequency_mhz = $$f, but BACKEND_FREQ_MHZ = $(BACKEND_FREQ_MHZ)."; \
+		echo "       Remove $(BACKEND_DIR)/ecc.toml and $(BACKEND_DIR)/project.json, then rerun."; \
+		exit 1; \
+	fi; \
+	if ! grep -q "\"workspace_id\": \"$(WORKSPACE)\"" $(BACKEND_DIR)/project.json 2>/dev/null; then \
+		echo "ERROR: workspace '$(WORKSPACE)' is not declared in $(BACKEND_DIR)/project.json."; \
+		echo "       Remove $(BACKEND_DIR)/ecc.toml and $(BACKEND_DIR)/project.json, then rerun."; \
+		exit 1; \
+	fi
 	@echo ">>> Starting automated physical design pipeline (Synthesis -> Floorplan -> Placement -> CTS -> Sizer -> Route -> RCX -> STA -> Harden)..."
 	$(ECC) run --project $(BACKEND_DIR) --workspace $(WORKSPACE) $(PNR_OVERWRITE)
-	@gunzip -k -f $(BACKEND_DIR)/$(WORKSPACE)/Synthesis_yosys/output/$(TOPNAME)_Synthesis_sim.v.gz 2>/dev/null || true
-	@echo ">>> Physical design pipeline finished. Packaging signoff deliverables..."
-	-$(MAKE) signoff
-	@echo ">>> Full physical design flow completed successfully."
-
-# Full flow with an explicitly requested clock frequency and a fresh workspace.
-# Removes the generated backend manifests so frequency_mhz is re-emitted.
-# Synthesis runs first so the workspace (and home/flow.json) exists; the yosys
-# formal-equivalence step is then marked as bypassed, matching the project.json
-# rule for the default workspace, and the flow resumes from Floorplan.
-pnr-freq:
-	@rm -f $(BACKEND_DIR)/ecc.toml $(BACKEND_DIR)/project.json
-	@$(MAKE) --no-print-directory $(BACKEND_DIR)/project.json
-	$(ECC_RUN) --only Synthesis
-	@python3 -c 'import json; p="$(BACKEND_DIR)/$(WORKSPACE)/home/flow.json"; d=json.load(open(p)); [s.update(state="Success", info={"bypassed": True}) for s in d.get("steps", []) if s.get("name")=="lec"]; json.dump(d, open(p, "w"), indent=4)'
-	$(ECC_RUN) --resume
 	@gunzip -k -f $(BACKEND_DIR)/$(WORKSPACE)/Synthesis_yosys/output/$(TOPNAME)_Synthesis_sim.v.gz 2>/dev/null || true
 	@echo ">>> Physical design pipeline finished. Packaging signoff deliverables..."
 	-$(MAKE) signoff
@@ -259,7 +254,7 @@ clean:
 .PHONY: default sim run sim-vpi sim-iverilog run-iverilog \
         synth pnr-synth pnr-floorplan pnr-place pnr-cts pnr-legalize \
         pnr-opt pnr-route pnr-filler pnr-rcx pnr-sta pnr-lvs pnr-drc \
-        pnr-harden pnr pnr-freq signoff sim-netlist-iv run-netlist-iv clean
+        pnr-harden pnr signoff sim-netlist-iv run-netlist-iv clean
 
 # ==============================================================================
 # 6. Fast STA (additive; does not touch the full backend flow)
