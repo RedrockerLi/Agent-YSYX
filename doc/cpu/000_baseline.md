@@ -132,8 +132,8 @@ flowchart TD
     end
 
     subgraph Caches ["高速缓存系统"]
-        ICACHE["ICache (2路组相联 / 16组 / 行宽16B)"]
-        DCACHE["DCache (2路组相联 / 写回 / 写分配 / 16组)"]
+        ICACHE["ICache (2路组相联 / 64组 / 行宽16B)"]
+        DCACHE["DCache (2路组相联 / 写回 / 写分配 / 64组)"]
         ARBITER["Cache Arbiter (总线仲裁器)"]
     end
 
@@ -157,7 +157,7 @@ flowchart TD
 ### 2.1 指令高速缓存 (ICache)
 - **架构模块**：[icache.v](../../npc/vsrc/icache.v)
 - **结构参数**：
-  - 容量与拓扑：2 路组相联 (2-Way Set-Associative)，16 个 Set，共 32 Cache Lines。
+  - 容量与拓扑：2 路组相联 (2-Way Set-Associative)，64 个 Set，共 128 Cache Lines（每路 1 KB，总容量 2 KB）。
   - 行大小 (Line Size)：16 字节（包含 4 条 32-bit 指令）。
   - 替换策略：伪 LRU（每组 1-bit 翻转标记）。
 - **缺失与突发重填**：
@@ -167,7 +167,7 @@ flowchart TD
 ### 2.2 数据高速缓存 (DCache)
 - **架构模块**：[dcache.v](../../npc/vsrc/dcache.v)
 - **结构参数**：
-  - 组织方式：2 路组相联，16 个 Set，共 32 Cache Lines，行大小 16 字节。
+  - 组织方式：2 路组相联，64 个 Set，共 128 Cache Lines，行大小 16 字节（每路 1 KB，总容量 2 KB）。
   - 写策略：**写回 (Write-Back)** 与 **写分配 (Write-Allocate)**，极大降低了写操作占用总线带宽的频率。
   - 脏行写回 (Dirty Eviction)：行置换遇脏行时，通过 4-Beat 突发写通道将旧行刷回外存。
   - 总线授权协调机制：`S_WB_LINE` 与 `S_FENCE_WB` 引入仲裁授权门控信号 `dcache_mem_grant`，杜绝突发计数漂移。

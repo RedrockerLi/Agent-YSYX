@@ -2,10 +2,17 @@
 
 // 2-way set-associative write-back D-cache.
 //
-// The sets are read as 8 banks of 8.  A request cycle registers a per-bank
-// copy of the set index; the next cycle reads the banks, selects the
-// requested bank, and captures the line and hit information.  The response or
-// writeback decision is made in S_RESP.
+// The 64 sets are read as 16 banks of 4.  A request cycle registers a per-bank
+// copy of the set index; the next cycle reads the banks and selects one bank
+// per group of four into a group candidate register.  The compare cycle picks
+// the requested group, compares tags, and registers the line and the hit
+// information.  The response or writeback decision is made in S_RESP.  A
+// 16:1 read mux therefore never sits on a single cycle boundary: each cycle
+// carries a 4:1 mux.
+//
+// The write ports use pre-decoded one-hot strobes (set one-hot per way, word
+// one-hot) and per-way/per-word data replicas, so neither the way select nor
+// the word select is broadcast to the whole array.
 module dcache #(
   parameter SET_WIDTH    = 6,               // 64 sets
   parameter OFFSET_WIDTH = 4,               // 16 bytes (4 words per line)
@@ -48,9 +55,12 @@ module dcache #(
 
   localparam NUM_SETS   = 1 << SET_WIDTH;
   localparam [NUM_SETS-1:0] ONE = 1;
-  localparam BANK_WIDTH = 3;
+  localparam BANK_WIDTH = 4;
   localparam NUM_BANKS  = 1 << BANK_WIDTH;
   localparam IN_BANK    = SET_WIDTH - BANK_WIDTH;
+  localparam GRP_WIDTH  = 2;
+  localparam NUM_GRPS   = 1 << GRP_WIDTH;
+  localparam IN_GRP     = BANK_WIDTH - GRP_WIDTH;
 
   reg                 way0_valid [NUM_SETS-1:0];
   reg                 way0_dirty [NUM_SETS-1:0];
@@ -87,9 +97,16 @@ module dcache #(
 
   reg [3:0]   state;
 
-  // Registered request.
-  reg [1:0]           saved_word_sel;
+  // Registered request.  The word select is kept one-hot so the word muxes
+  // are driven by four nets of 32 loads instead of two nets of 64.  The
+  // refill merge select is precomputed separately so the response muxes and
+  // the refill data registers are driven by different nets.
+  reg [3:0]           saved_word_oh;
+  reg [3:0]           rw_word_oh;
   reg [31:0]          saved_addr;
+  // Line address of the pending request, formed in the request cycle so the
+  // memory-request register is not loaded from the wide saved_addr net.
+  reg [31:0]          req_line_addr;
   reg                 saved_write;
   reg [31:0]          saved_wdata;
   reg [3:0]           saved_wmask;
@@ -102,22 +119,75 @@ module dcache #(
   reg         sel_dirty0_r, sel_dirty1_r;
   reg         sel_lru_r;
 
-  // Registered write ports.  The one-hot write index keeps the 6-to-64
-  // decode out of the path to the array flops.
-  reg [NUM_SETS-1:0] st_wr_oh, rf_wr_oh, fe_clr_oh;
-  reg                st_hit0, rf_way, fe_clr_w0, fe_clr_w1;
-  reg [31:0]         st_word_r;
-  reg [127:0]         cand_line0  [0:NUM_BANKS-1];
-  reg [127:0]         cand_line1  [0:NUM_BANKS-1];
-  reg [TAG_WIDTH-1:0] cand_tag0   [0:NUM_BANKS-1];
-  reg [TAG_WIDTH-1:0] cand_tag1   [0:NUM_BANKS-1];
-  reg                 cand_valid0 [0:NUM_BANKS-1];
-  reg                 cand_valid1 [0:NUM_BANKS-1];
-  reg                 cand_dirty0 [0:NUM_BANKS-1];
-  reg                 cand_dirty1 [0:NUM_BANKS-1];
-  reg                 cand_lru    [0:NUM_BANKS-1];
-  reg                 cand_eq0    [0:NUM_BANKS-1];
-  reg                 cand_eq1    [0:NUM_BANKS-1];
+  // Registered write ports.  Every strobe is a one-hot vector and every data
+  // input has a per-way/per-word replica, so the array write does not
+  // broadcast a way/word select across the 16k data flops.
+  reg [NUM_SETS-1:0] st_w0_oh, st_w1_oh;
+  reg [NUM_SETS-1:0] rf_w0_oh, rf_w1_oh;
+  reg [NUM_SETS-1:0] fe_w0_oh, fe_w1_oh;
+  reg [NUM_SETS-1:0] fence_set_oh;
+  reg [3:0]          st_word_oh;
+  reg [31:0]         st_data [0:7];   // {way, word}
+  reg [31:0]         rf_data [0:7];   // {way, word}
+
+  // Group candidates: one selected bank per group of four, both ways.
+  reg [127:0]         cand_line0  [0:NUM_GRPS-1];
+  reg [127:0]         cand_line1  [0:NUM_GRPS-1];
+  reg [TAG_WIDTH-1:0] cand_tag0   [0:NUM_GRPS-1];
+  reg [TAG_WIDTH-1:0] cand_tag1   [0:NUM_GRPS-1];
+  reg                 cand_valid0 [0:NUM_GRPS-1];
+  reg                 cand_valid1 [0:NUM_GRPS-1];
+  reg                 cand_dirty0 [0:NUM_GRPS-1];
+  reg                 cand_dirty1 [0:NUM_GRPS-1];
+  reg                 cand_lru    [0:NUM_GRPS-1];
+  reg                 cand_eq0    [0:NUM_GRPS-1];
+  reg                 cand_eq1    [0:NUM_GRPS-1];
+  // Group select, one-hot.
+  wire [127:0]         sel_line0 = ({128{d_grp_oh[0]}} & cand_line0[0]) |
+                                   ({128{d_grp_oh[1]}} & cand_line0[1]) |
+                                   ({128{d_grp_oh[2]}} & cand_line0[2]) |
+                                   ({128{d_grp_oh[3]}} & cand_line0[3]);
+  wire [127:0]         sel_line1 = ({128{d_grp_oh[0]}} & cand_line1[0]) |
+                                   ({128{d_grp_oh[1]}} & cand_line1[1]) |
+                                   ({128{d_grp_oh[2]}} & cand_line1[2]) |
+                                   ({128{d_grp_oh[3]}} & cand_line1[3]);
+  wire [TAG_WIDTH-1:0] sel_tag0w = ({TAG_WIDTH{d_grp_oh[0]}} & cand_tag0[0]) |
+                                   ({TAG_WIDTH{d_grp_oh[1]}} & cand_tag0[1]) |
+                                   ({TAG_WIDTH{d_grp_oh[2]}} & cand_tag0[2]) |
+                                   ({TAG_WIDTH{d_grp_oh[3]}} & cand_tag0[3]);
+  wire [TAG_WIDTH-1:0] sel_tag1w = ({TAG_WIDTH{d_grp_oh[0]}} & cand_tag1[0]) |
+                                   ({TAG_WIDTH{d_grp_oh[1]}} & cand_tag1[1]) |
+                                   ({TAG_WIDTH{d_grp_oh[2]}} & cand_tag1[2]) |
+                                   ({TAG_WIDTH{d_grp_oh[3]}} & cand_tag1[3]);
+  wire                 sel_valid0w = (cand_valid0[0] & d_grp_oh[0]) |
+                                      (cand_valid0[1] & d_grp_oh[1]) |
+                                      (cand_valid0[2] & d_grp_oh[2]) |
+                                      (cand_valid0[3] & d_grp_oh[3]);
+  wire                 sel_valid1w = (cand_valid1[0] & d_grp_oh[0]) |
+                                      (cand_valid1[1] & d_grp_oh[1]) |
+                                      (cand_valid1[2] & d_grp_oh[2]) |
+                                      (cand_valid1[3] & d_grp_oh[3]);
+  wire                 sel_dirty0w = (cand_dirty0[0] & d_grp_oh[0]) |
+                                      (cand_dirty0[1] & d_grp_oh[1]) |
+                                      (cand_dirty0[2] & d_grp_oh[2]) |
+                                      (cand_dirty0[3] & d_grp_oh[3]);
+  wire                 sel_dirty1w = (cand_dirty1[0] & d_grp_oh[0]) |
+                                      (cand_dirty1[1] & d_grp_oh[1]) |
+                                      (cand_dirty1[2] & d_grp_oh[2]) |
+                                      (cand_dirty1[3] & d_grp_oh[3]);
+  wire                 sel_lruw    = (cand_lru[0] & d_grp_oh[0]) |
+                                      (cand_lru[1] & d_grp_oh[1]) |
+                                      (cand_lru[2] & d_grp_oh[2]) |
+                                      (cand_lru[3] & d_grp_oh[3]);
+  wire                 sel_eq0w    = (cand_eq0[0] & d_grp_oh[0]) |
+                                      (cand_eq0[1] & d_grp_oh[1]) |
+                                      (cand_eq0[2] & d_grp_oh[2]) |
+                                      (cand_eq0[3] & d_grp_oh[3]);
+  wire                 sel_eq1w    = (cand_eq1[0] & d_grp_oh[0]) |
+                                      (cand_eq1[1] & d_grp_oh[1]) |
+                                      (cand_eq1[2] & d_grp_oh[2]) |
+                                      (cand_eq1[3] & d_grp_oh[3]);
+
   reg         hit0_r, hit1_r;
   reg         valid0_r, valid1_r;
   reg         dirty0_r, dirty1_r;
@@ -125,7 +195,6 @@ module dcache #(
   // Refill / writeback state.
   reg [127:0] dirty_line_buf;
   reg [127:0] refill_buf;
-  reg [127:0] refill_line_r;
   reg [1:0]   beat_cnt;
 
   // Fence scan state.
@@ -139,8 +208,8 @@ module dcache #(
   assign fence_done = fence_done_r;
   assign req_ready  = (state == S_IDLE) && !fence_i;
 
-  wire [BANK_WIDTH-1:0] bank_w    = req_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH+BANK_WIDTH];
-  wire [IN_BANK-1:0]    set_w     = req_addr[OFFSET_WIDTH+BANK_WIDTH-1 : OFFSET_WIDTH];
+  wire [BANK_WIDTH-1:0] bank_w    = req_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH+IN_BANK];
+  wire [IN_BANK-1:0]    set_w     = req_addr[OFFSET_WIDTH+IN_BANK-1 : OFFSET_WIDTH];
   wire [1:0]            word_sel_w = req_addr[3:2];
 
   wire [SET_WIDTH-1:0] saved_index = saved_addr[OFFSET_WIDTH+SET_WIDTH-1 : OFFSET_WIDTH];
@@ -149,12 +218,36 @@ module dcache #(
   wire is_mmio = (req_addr < 32'h80000000) || (req_addr >= 32'h88000000);
 
   // Word-plane storage: four 32-bit arrays per way keep the read mux width at
-  // 32 bits instead of 128 bits.  The sets are read as 8 banks of 8; each
+  // 32 bits instead of 128 bits.  The sets are read as 16 banks of 4; each
   // bank is driven by its own registered copy of the set index so the index
   // fanout stays inside a bank.
   reg [BANK_WIDTH-1:0] d_bank;
   reg [TAG_WIDTH-1:0]  d_tag;
   reg [IN_BANK-1:0]    db_set [0:NUM_BANKS-1];
+
+  // The bank select splits into a group index (picked in the compare cycle)
+  // and a bank-in-group index (picked while the banks are read).  Both are
+  // decoded one-hot from the registered bank index, so each select net
+  // drives a quarter of the mux gates a binary select would.
+
+  // Bank indices of the four banks inside each group (one-hot select).
+  wire [BANK_WIDTH-1:0] grp_bank0 [0:NUM_GRPS-1];
+  wire [BANK_WIDTH-1:0] grp_bank1 [0:NUM_GRPS-1];
+  wire [BANK_WIDTH-1:0] grp_bank2 [0:NUM_GRPS-1];
+  wire [BANK_WIDTH-1:0] grp_bank3 [0:NUM_GRPS-1];
+  genvar gg;
+  generate
+    for (gg = 0; gg < NUM_GRPS; gg = gg + 1) begin : g_grp
+      assign grp_bank0[gg] = {gg[GRP_WIDTH-1:0], 2'd0};
+      assign grp_bank1[gg] = {gg[GRP_WIDTH-1:0], 2'd1};
+      assign grp_bank2[gg] = {gg[GRP_WIDTH-1:0], 2'd2};
+      assign grp_bank3[gg] = {gg[GRP_WIDTH-1:0], 2'd3};
+    end
+  endgenerate
+
+  // One-hot decodes of the registered bank index.
+  wire [NUM_GRPS-1:0]  d_grp_oh = 4'b0001 << d_bank[BANK_WIDTH-1:IN_GRP];
+  wire [NUM_GRPS-1:0]  d_lo_oh  = 4'b0001 << d_bank[IN_GRP-1:0];
 
   wire [127:0]         bank_line0  [0:NUM_BANKS-1];
   wire [127:0]         bank_line1  [0:NUM_BANKS-1];
@@ -184,27 +277,6 @@ module dcache #(
     end
   endgenerate
 
-  wire hit0_now = cand_valid0[d_bank] && cand_eq0[d_bank] &&
-                  (cand_tag0[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
-  wire hit1_now = cand_valid1[d_bank] && cand_eq1[d_bank] &&
-                  (cand_tag1[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
-  wire [127:0] cmp_line = hit0_now ? cand_line0[d_bank] : cand_line1[d_bank];
-  wire [31:0]  cmp_word = (saved_word_sel == 2'b00) ? cmp_line[31:0] :
-                          (saved_word_sel == 2'b01) ? cmp_line[63:32] :
-                          (saved_word_sel == 2'b10) ? cmp_line[95:64] :
-                                                      cmp_line[127:96];
-  wire [31:0]  cmp_merged = apply_mask(cmp_word, saved_wdata, saved_wmask);
-
-  wire [127:0]         sel_line0  = bank_line0[d_bank];
-  wire [127:0]         sel_line1  = bank_line1[d_bank];
-  wire [TAG_WIDTH-1:0] sel_tag0   = bank_tag0[d_bank];
-  wire [TAG_WIDTH-1:0] sel_tag1   = bank_tag1[d_bank];
-  wire                 sel_valid0 = bank_valid0[d_bank];
-  wire                 sel_valid1 = bank_valid1[d_bank];
-  wire                 sel_dirty0 = bank_dirty0[d_bank];
-  wire                 sel_dirty1 = bank_dirty1[d_bank];
-  wire                 sel_lru    = bank_lru[d_bank];
-
   function [31:0] apply_mask;
     input [31:0] orig_word;
     input [31:0] new_word;
@@ -219,29 +291,30 @@ module dcache #(
     end
   endfunction
 
-  wire [127:0] resp_line = hit0_r ? line0_r : line1_r;
-  wire [31:0]  resp_hit_word =
-      (saved_word_sel == 2'b00) ? resp_line[31:0] :
-      (saved_word_sel == 2'b01) ? resp_line[63:32] :
-      (saved_word_sel == 2'b10) ? resp_line[95:64] :
-                                  resp_line[127:96];
+  // Word select runs on each way separately and the way is picked with a
+  // 32-bit mux, so the hit bit fans out to 32 gates instead of 128.
+  wire [31:0]  resp_word0 =
+      ({32{saved_word_oh[0]}} & line0_r[31:0])  |
+      ({32{saved_word_oh[1]}} & line0_r[63:32]) |
+      ({32{saved_word_oh[2]}} & line0_r[95:64]) |
+      ({32{saved_word_oh[3]}} & line0_r[127:96]);
+  wire [31:0]  resp_word1 =
+      ({32{saved_word_oh[0]}} & line1_r[31:0])  |
+      ({32{saved_word_oh[1]}} & line1_r[63:32]) |
+      ({32{saved_word_oh[2]}} & line1_r[95:64]) |
+      ({32{saved_word_oh[3]}} & line1_r[127:96]);
+  wire [31:0]  resp_hit_word = hit0_r ? resp_word0 : resp_word1;
   wire [31:0]  resp_merged_word = apply_mask(resp_hit_word, saved_wdata, saved_wmask);
 
   wire [31:0]  refill_word =
-      (saved_word_sel == 2'b00) ? refill_buf[31:0] :
-      (saved_word_sel == 2'b01) ? refill_buf[63:32] :
-      (saved_word_sel == 2'b10) ? refill_buf[95:64] :
-                                  refill_buf[127:96];
-  wire [31:0]  refill_resp_word = saved_write ? apply_mask(refill_word, saved_wdata, saved_wmask) : refill_word;
-
-  wire [127:0] refill_merged =
-      (saved_word_sel == 2'b00) ? {refill_buf[127:32], apply_mask(refill_buf[31:0],   saved_wdata, saved_wmask)} :
-      (saved_word_sel == 2'b01) ? {refill_buf[127:64], apply_mask(refill_buf[63:32],  saved_wdata, saved_wmask), refill_buf[31:0]} :
-      (saved_word_sel == 2'b10) ? {refill_buf[127:96], apply_mask(refill_buf[95:64],  saved_wdata, saved_wmask), refill_buf[63:0]} :
-                                  {apply_mask(refill_buf[127:96], saved_wdata, saved_wmask), refill_buf[95:0]};
+      ({32{saved_word_oh[0]}} & refill_buf[31:0])  |
+      ({32{saved_word_oh[1]}} & refill_buf[63:32]) |
+      ({32{saved_word_oh[2]}} & refill_buf[95:64]) |
+      ({32{saved_word_oh[3]}} & refill_buf[127:96]);
   // A refill for a read miss writes the fetched line unchanged; only a store
-  // miss merges the pending word.
-  wire [127:0] refill_store_line = saved_write ? refill_merged : refill_buf;
+  // miss merges the pending word, and only that one word is masked.
+  wire [31:0]  refill_mask_word = apply_mask(refill_word, saved_wdata, saved_wmask);
+  wire [31:0]  refill_resp_word = saved_write ? refill_mask_word : refill_word;
 
   wire [31:0]  wb_wdata =
       (beat_cnt == 2'b00) ? dirty_line_buf[31:0] :
@@ -266,6 +339,12 @@ module dcache #(
                       (state == S_REFILL_DONE) ? refill_resp_word :
                       (state == S_MMIO_WAIT) ? mem_resp_rdata : 32'b0;
 
+  // Fence-clear targets for the current set.
+  wire fe_hit0 = fence_valid0 && fence_dirty0;
+  wire fe_hit1 = fence_valid1 && fence_dirty1;
+  wire fe_do0  = fe_hit0 || (!fe_hit0 && !fe_hit1);
+  wire fe_do1  = !fe_hit0;
+
   integer j;
   always @(posedge clock) begin
     if (reset) begin
@@ -274,8 +353,10 @@ module dcache #(
       mem_req_write    <= 1'b0;
       mem_req_addr     <= 32'b0;
       mem_req_len      <= 8'd0;
-      saved_word_sel   <= 2'b0;
+      saved_word_oh    <= 4'b0;
+      rw_word_oh       <= 4'b0;
       saved_addr       <= 32'b0;
+      req_line_addr    <= 32'b0;
       saved_write      <= 1'b0;
       saved_wdata      <= 32'b0;
       saved_wmask      <= 4'b0;
@@ -298,7 +379,6 @@ module dcache #(
       dirty1_r         <= 1'b0;
       dirty_line_buf   <= 128'b0;
       refill_buf       <= 128'b0;
-      refill_line_r    <= 128'b0;
       beat_cnt         <= 2'b0;
       fence_set        <= {SET_WIDTH{1'b0}};
       fence_line0      <= 128'b0;
@@ -314,16 +394,21 @@ module dcache #(
       miss_count       <= 32'b0;
       d_bank           <= {BANK_WIDTH{1'b0}};
       d_tag            <= {TAG_WIDTH{1'b0}};
-      st_wr_oh         <= {NUM_SETS{1'b0}};
-      rf_wr_oh         <= {NUM_SETS{1'b0}};
-      fe_clr_oh        <= {NUM_SETS{1'b0}};
-      st_hit0          <= 1'b0;
-      rf_way           <= 1'b0;
-      fe_clr_w0        <= 1'b0;
-      fe_clr_w1        <= 1'b0;
-      st_word_r        <= 32'b0;
-      for (j = 0; j < NUM_BANKS; j = j + 1) begin
-        db_set[j]     <= {IN_BANK{1'b0}};
+      st_w0_oh         <= {NUM_SETS{1'b0}};
+      st_w1_oh         <= {NUM_SETS{1'b0}};
+      rf_w0_oh         <= {NUM_SETS{1'b0}};
+      rf_w1_oh         <= {NUM_SETS{1'b0}};
+      fe_w0_oh         <= {NUM_SETS{1'b0}};
+      fe_w1_oh         <= {NUM_SETS{1'b0}};
+      fence_set_oh     <= {NUM_SETS{1'b0}};
+      st_word_oh       <= 4'b0;
+      for (j = 0; j < 8; j = j + 1) begin
+        st_data[j] <= 32'b0;
+        rf_data[j] <= 32'b0;
+      end
+      for (j = 0; j < NUM_BANKS; j = j + 1)
+        db_set[j] <= {IN_BANK{1'b0}};
+      for (j = 0; j < NUM_GRPS; j = j + 1) begin
         cand_line0[j] <= 128'b0;
         cand_line1[j] <= 128'b0;
         cand_tag0[j]  <= {TAG_WIDTH{1'b0}};
@@ -346,63 +431,120 @@ module dcache #(
     end else begin
       fence_done_r <= 1'b0;
       resp_valid_r <= 1'b0;
-      st_wr_oh     <= {NUM_SETS{1'b0}};
-      rf_wr_oh     <= {NUM_SETS{1'b0}};
-      fe_clr_oh    <= {NUM_SETS{1'b0}};
+      st_w0_oh     <= {NUM_SETS{1'b0}};
+      st_w1_oh     <= {NUM_SETS{1'b0}};
+      rf_w0_oh     <= {NUM_SETS{1'b0}};
+      rf_w1_oh     <= {NUM_SETS{1'b0}};
+      fe_w0_oh     <= {NUM_SETS{1'b0}};
+      fe_w1_oh     <= {NUM_SETS{1'b0}};
+      st_word_oh   <= 4'b0;
 
-      // Storage write ports, driven by the registered one-hot indices.
+      // Storage write ports, driven by the registered one-hot strobes and
+      // per-way/per-word data replicas.
       for (j = 0; j < NUM_SETS; j = j + 1) begin
-        if (fe_clr_oh[j]) begin
-          if (fe_clr_w0) begin
-            way0_valid[j] <= 1'b0;
-            way0_dirty[j] <= 1'b0;
-          end
-          if (fe_clr_w1) begin
-            way1_valid[j] <= 1'b0;
-            way1_dirty[j] <= 1'b0;
-          end
+        if (st_w0_oh[j]) begin
+          way0_dirty[j] <= 1'b1;
+          lru[j]        <= 1'b1;
+          if (st_word_oh[0]) way0_word0[j] <= st_data[0];
+          if (st_word_oh[1]) way0_word1[j] <= st_data[1];
+          if (st_word_oh[2]) way0_word2[j] <= st_data[2];
+          if (st_word_oh[3]) way0_word3[j] <= st_data[3];
         end
-        if (st_wr_oh[j]) begin
-          lru[j] <= st_hit0;
-          if (st_hit0) begin
-            way0_dirty[j] <= 1'b1;
-            case (saved_word_sel)
-              2'b00: way0_word0[j] <= st_word_r;
-              2'b01: way0_word1[j] <= st_word_r;
-              2'b10: way0_word2[j] <= st_word_r;
-              2'b11: way0_word3[j] <= st_word_r;
-            endcase
-          end else begin
-            way1_dirty[j] <= 1'b1;
-            case (saved_word_sel)
-              2'b00: way1_word0[j] <= st_word_r;
-              2'b01: way1_word1[j] <= st_word_r;
-              2'b10: way1_word2[j] <= st_word_r;
-              2'b11: way1_word3[j] <= st_word_r;
-            endcase
-          end
+        if (st_w1_oh[j]) begin
+          way1_dirty[j] <= 1'b1;
+          lru[j]        <= 1'b0;
+          if (st_word_oh[0]) way1_word0[j] <= st_data[4];
+          if (st_word_oh[1]) way1_word1[j] <= st_data[5];
+          if (st_word_oh[2]) way1_word2[j] <= st_data[6];
+          if (st_word_oh[3]) way1_word3[j] <= st_data[7];
         end
-        if (rf_wr_oh[j]) begin
-          if (rf_way) begin
-            way1_valid[j] <= 1'b1;
-            way1_tag[j]   <= saved_tag;
-            way1_dirty[j] <= saved_write;
-            way1_word0[j] <= refill_line_r[31:0];
-            way1_word1[j] <= refill_line_r[63:32];
-            way1_word2[j] <= refill_line_r[95:64];
-            way1_word3[j] <= refill_line_r[127:96];
-            lru[j]        <= 1'b0;
-          end else begin
-            way0_valid[j] <= 1'b1;
-            way0_tag[j]   <= saved_tag;
-            way0_dirty[j] <= saved_write;
-            way0_word0[j] <= refill_line_r[31:0];
-            way0_word1[j] <= refill_line_r[63:32];
-            way0_word2[j] <= refill_line_r[95:64];
-            way0_word3[j] <= refill_line_r[127:96];
-            lru[j]        <= 1'b1;
-          end
+        if (rf_w0_oh[j]) begin
+          way0_valid[j] <= 1'b1;
+          way0_tag[j]   <= saved_tag;
+          way0_dirty[j] <= saved_write;
+          way0_word0[j] <= rf_data[0];
+          way0_word1[j] <= rf_data[1];
+          way0_word2[j] <= rf_data[2];
+          way0_word3[j] <= rf_data[3];
+          lru[j]        <= 1'b1;
         end
+        if (rf_w1_oh[j]) begin
+          way1_valid[j] <= 1'b1;
+          way1_tag[j]   <= saved_tag;
+          way1_dirty[j] <= saved_write;
+          way1_word0[j] <= rf_data[4];
+          way1_word1[j] <= rf_data[5];
+          way1_word2[j] <= rf_data[6];
+          way1_word3[j] <= rf_data[7];
+          lru[j]        <= 1'b0;
+        end
+        if (fe_w0_oh[j]) begin
+          way0_valid[j] <= 1'b0;
+          way0_dirty[j] <= 1'b0;
+        end
+        if (fe_w1_oh[j]) begin
+          way1_valid[j] <= 1'b0;
+          way1_dirty[j] <= 1'b0;
+        end
+      end
+
+      // Bank read capture runs every cycle: the bank index registers are
+      // stable across the read and compare cycles, so gating the capture with
+      // the state decode would only add a wide enable net in front of the
+      // candidate flops.
+      for (j = 0; j < NUM_GRPS; j = j + 1) begin
+        cand_line0[j]  <= ({128{d_lo_oh[0]}} & bank_line0[grp_bank0[j]]) |
+                          ({128{d_lo_oh[1]}} & bank_line0[grp_bank1[j]]) |
+                          ({128{d_lo_oh[2]}} & bank_line0[grp_bank2[j]]) |
+                          ({128{d_lo_oh[3]}} & bank_line0[grp_bank3[j]]);
+        cand_line1[j]  <= ({128{d_lo_oh[0]}} & bank_line1[grp_bank0[j]]) |
+                          ({128{d_lo_oh[1]}} & bank_line1[grp_bank1[j]]) |
+                          ({128{d_lo_oh[2]}} & bank_line1[grp_bank2[j]]) |
+                          ({128{d_lo_oh[3]}} & bank_line1[grp_bank3[j]]);
+        cand_tag0[j]   <= ({TAG_WIDTH{d_lo_oh[0]}} & bank_tag0[grp_bank0[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[1]}} & bank_tag0[grp_bank1[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[2]}} & bank_tag0[grp_bank2[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[3]}} & bank_tag0[grp_bank3[j]]);
+        cand_tag1[j]   <= ({TAG_WIDTH{d_lo_oh[0]}} & bank_tag1[grp_bank0[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[1]}} & bank_tag1[grp_bank1[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[2]}} & bank_tag1[grp_bank2[j]]) |
+                          ({TAG_WIDTH{d_lo_oh[3]}} & bank_tag1[grp_bank3[j]]);
+        cand_valid0[j] <= (bank_valid0[grp_bank0[j]] & d_lo_oh[0]) |
+                          (bank_valid0[grp_bank1[j]] & d_lo_oh[1]) |
+                          (bank_valid0[grp_bank2[j]] & d_lo_oh[2]) |
+                          (bank_valid0[grp_bank3[j]] & d_lo_oh[3]);
+        cand_valid1[j] <= (bank_valid1[grp_bank0[j]] & d_lo_oh[0]) |
+                          (bank_valid1[grp_bank1[j]] & d_lo_oh[1]) |
+                          (bank_valid1[grp_bank2[j]] & d_lo_oh[2]) |
+                          (bank_valid1[grp_bank3[j]] & d_lo_oh[3]);
+        cand_dirty0[j] <= (bank_dirty0[grp_bank0[j]] & d_lo_oh[0]) |
+                          (bank_dirty0[grp_bank1[j]] & d_lo_oh[1]) |
+                          (bank_dirty0[grp_bank2[j]] & d_lo_oh[2]) |
+                          (bank_dirty0[grp_bank3[j]] & d_lo_oh[3]);
+        cand_dirty1[j] <= (bank_dirty1[grp_bank0[j]] & d_lo_oh[0]) |
+                          (bank_dirty1[grp_bank1[j]] & d_lo_oh[1]) |
+                          (bank_dirty1[grp_bank2[j]] & d_lo_oh[2]) |
+                          (bank_dirty1[grp_bank3[j]] & d_lo_oh[3]);
+        cand_lru[j]    <= (bank_lru[grp_bank0[j]] & d_lo_oh[0]) |
+                          (bank_lru[grp_bank1[j]] & d_lo_oh[1]) |
+                          (bank_lru[grp_bank2[j]] & d_lo_oh[2]) |
+                          (bank_lru[grp_bank3[j]] & d_lo_oh[3]);
+        cand_eq0[j]    <= ((bank_tag0[grp_bank0[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[0]) |
+                          ((bank_tag0[grp_bank1[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[1]) |
+                          ((bank_tag0[grp_bank2[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[2]) |
+                          ((bank_tag0[grp_bank3[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[3]);
+        cand_eq1[j]    <= ((bank_tag1[grp_bank0[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[0]) |
+                          ((bank_tag1[grp_bank1[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[1]) |
+                          ((bank_tag1[grp_bank2[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[2]) |
+                          ((bank_tag1[grp_bank3[j]][TAG_WIDTH/2-1:0] ==
+                            d_tag[TAG_WIDTH/2-1:0]) & d_lo_oh[3]);
       end
 
       case (state)
@@ -415,7 +557,8 @@ module dcache #(
             saved_write    <= req_write;
             saved_wdata    <= req_wdata;
             saved_wmask    <= req_wmask;
-            saved_word_sel <= word_sel_w;
+            saved_word_oh  <= 4'b0001 << word_sel_w;
+            rw_word_oh     <= req_write ? (4'b0001 << word_sel_w) : 4'b0;
 
             if (is_mmio) begin
               mem_req_valid <= 1'b1;
@@ -426,65 +569,62 @@ module dcache #(
             end else begin
               // Register the address first; the bank read runs from per-bank
               // index copies in the next cycle.
+              req_line_addr <= {req_addr[31:4], 4'b0000};
               for (j = 0; j < NUM_BANKS; j = j + 1)
                 db_set[j] <= set_w;
-              d_bank <= bank_w;
-              d_tag  <= req_addr[31 : OFFSET_WIDTH+SET_WIDTH];
+              d_bank   <= bank_w;
+              d_tag    <= req_addr[31 : OFFSET_WIDTH+SET_WIDTH];
               state  <= S_BANK;
             end
           end
         end
 
         S_BANK: begin
-          for (j = 0; j < NUM_BANKS; j = j + 1) begin
-            cand_line0[j]  <= bank_line0[j];
-            cand_line1[j]  <= bank_line1[j];
-            cand_tag0[j]   <= bank_tag0[j];
-            cand_tag1[j]   <= bank_tag1[j];
-            cand_valid0[j] <= bank_valid0[j];
-            cand_valid1[j] <= bank_valid1[j];
-            cand_dirty0[j] <= bank_dirty0[j];
-            cand_dirty1[j] <= bank_dirty1[j];
-            cand_lru[j]    <= bank_lru[j];
-            cand_eq0[j]    <= (bank_tag0[j][TAG_WIDTH/2-1:0] == d_tag[TAG_WIDTH/2-1:0]);
-            cand_eq1[j]    <= (bank_tag1[j][TAG_WIDTH/2-1:0] == d_tag[TAG_WIDTH/2-1:0]);
-          end
           state <= S_CMP;
         end
 
         S_CMP: begin
-          st_wr_oh  <= (saved_write && (hit0_now || hit1_now)) ? (ONE << saved_index)
-                                                               : {NUM_SETS{1'b0}};
-          st_hit0   <= hit0_now;
-          st_word_r <= cmp_merged;
-          line0_r   <= cand_line0[d_bank];
-          line1_r   <= cand_line1[d_bank];
-          sel_tag0_r <= cand_tag0[d_bank];
-          sel_tag1_r <= cand_tag1[d_bank];
-          sel_valid0_r <= cand_valid0[d_bank];
-          sel_valid1_r <= cand_valid1[d_bank];
-          sel_dirty0_r <= cand_dirty0[d_bank];
-          sel_dirty1_r <= cand_dirty1[d_bank];
-          sel_lru_r    <= cand_lru[d_bank];
-          resp_valid_r <= (cand_valid0[d_bank] && cand_eq0[d_bank] &&
-                           (cand_tag0[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2])) ||
-                          (cand_valid1[d_bank] && cand_eq1[d_bank] &&
-                           (cand_tag1[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]));
-          hit0_r   <= cand_valid0[d_bank] && cand_eq0[d_bank] &&
-                      (cand_tag0[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
-          hit1_r   <= cand_valid1[d_bank] && cand_eq1[d_bank] &&
-                      (cand_tag1[d_bank][TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
-          valid0_r <= cand_valid0[d_bank];
-          valid1_r <= cand_valid1[d_bank];
-          dirty0_r <= cand_dirty0[d_bank];
-          dirty1_r <= cand_dirty1[d_bank];
+          line0_r   <= sel_line0;
+          line1_r   <= sel_line1;
+          sel_tag0_r <= sel_tag0w;
+          sel_tag1_r <= sel_tag1w;
+          sel_valid0_r <= sel_valid0w;
+          sel_valid1_r <= sel_valid1w;
+          sel_dirty0_r <= sel_dirty0w;
+          sel_dirty1_r <= sel_dirty1w;
+          sel_lru_r    <= sel_lruw;
+          resp_valid_r <= (sel_valid0w && sel_eq0w &&
+                           (sel_tag0w[TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2])) ||
+                          (sel_valid1w && sel_eq1w &&
+                           (sel_tag1w[TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]));
+          hit0_r   <= sel_valid0w && sel_eq0w &&
+                      (sel_tag0w[TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
+          hit1_r   <= sel_valid1w && sel_eq1w &&
+                      (sel_tag1w[TAG_WIDTH-1:TAG_WIDTH/2] == d_tag[TAG_WIDTH-1:TAG_WIDTH/2]);
+          valid0_r <= sel_valid0w;
+          valid1_r <= sel_valid1w;
+          dirty0_r <= sel_dirty0w;
+          dirty1_r <= sel_dirty1w;
           state    <= S_RESP;
         end
 
         S_RESP: begin
           if (hit0_r || hit1_r) begin
             hit_count <= hit_count + 32'd1;
-            state     <= S_IDLE;
+            // The write port is registered from the registered hit result, so
+            // neither the bank mux nor the word select sits on its path.
+            st_w0_oh   <= (saved_write &&  hit0_r) ? (ONE << saved_index) : {NUM_SETS{1'b0}};
+            st_w1_oh   <= (saved_write && !hit0_r) ? (ONE << saved_index) : {NUM_SETS{1'b0}};
+            st_word_oh <= saved_write ? saved_word_oh : 4'b0;
+            st_data[0] <= resp_merged_word;
+            st_data[1] <= resp_merged_word;
+            st_data[2] <= resp_merged_word;
+            st_data[3] <= resp_merged_word;
+            st_data[4] <= resp_merged_word;
+            st_data[5] <= resp_merged_word;
+            st_data[6] <= resp_merged_word;
+            st_data[7] <= resp_merged_word;
+            state      <= S_IDLE;
           end else begin
             miss_count       <= miss_count + 32'd1;
             saved_victim_way <= sel_lru_r;
@@ -500,7 +640,7 @@ module dcache #(
             end else begin
               mem_req_valid <= 1'b1;
               mem_req_write <= 1'b0;
-              mem_req_addr  <= {saved_addr[31:4], 4'b0000};
+              mem_req_addr  <= req_line_addr;
               mem_req_len   <= 8'd3;
               beat_cnt      <= 2'b00;
               state         <= S_REFILL;
@@ -518,7 +658,7 @@ module dcache #(
           if (mem_resp_valid) begin
             mem_req_valid <= 1'b1;
             mem_req_write <= 1'b0;
-            mem_req_addr  <= {saved_addr[31:4], 4'b0000};
+            mem_req_addr  <= req_line_addr;
             mem_req_len   <= 8'd3;
             beat_cnt      <= 2'b00;
             state         <= S_REFILL;
@@ -548,10 +688,17 @@ module dcache #(
         S_REFILL_MERGE: begin
           // Merge the pending store word into the fetched line in its own
           // cycle; the array write data and index are then plain flops.
-          refill_line_r <= refill_store_line;
-          rf_wr_oh      <= ONE << saved_index;
-          rf_way        <= saved_victim_way;
-          resp_valid_r  <= 1'b1;
+          rf_w0_oh  <= saved_victim_way ? {NUM_SETS{1'b0}} : (ONE << saved_index);
+          rf_w1_oh  <= saved_victim_way ? (ONE << saved_index) : {NUM_SETS{1'b0}};
+          rf_data[0] <= rw_word_oh[0] ? refill_mask_word : refill_buf[31:0];
+          rf_data[1] <= rw_word_oh[1] ? refill_mask_word : refill_buf[63:32];
+          rf_data[2] <= rw_word_oh[2] ? refill_mask_word : refill_buf[95:64];
+          rf_data[3] <= rw_word_oh[3] ? refill_mask_word : refill_buf[127:96];
+          rf_data[4] <= rw_word_oh[0] ? refill_mask_word : refill_buf[31:0];
+          rf_data[5] <= rw_word_oh[1] ? refill_mask_word : refill_buf[63:32];
+          rf_data[6] <= rw_word_oh[2] ? refill_mask_word : refill_buf[95:64];
+          rf_data[7] <= rw_word_oh[3] ? refill_mask_word : refill_buf[127:96];
+          resp_valid_r <= 1'b1;
           state         <= S_REFILL_DONE;
         end
 
@@ -574,38 +721,28 @@ module dcache #(
           // access, so the scan does not take the 64:1 array mux path.
           for (j = 0; j < NUM_BANKS; j = j + 1)
             db_set[j] <= fence_set[IN_BANK-1:0];
-          d_bank <= fence_set[SET_WIDTH-1:IN_BANK];
-          state  <= S_FENCE_BANK;
+          d_bank   <= fence_set[SET_WIDTH-1:IN_BANK];
+          state    <= S_FENCE_BANK;
         end
 
         S_FENCE_BANK: begin
-          for (j = 0; j < NUM_BANKS; j = j + 1) begin
-            cand_line0[j]  <= bank_line0[j];
-            cand_line1[j]  <= bank_line1[j];
-            cand_tag0[j]   <= bank_tag0[j];
-            cand_tag1[j]   <= bank_tag1[j];
-            cand_valid0[j] <= bank_valid0[j];
-            cand_valid1[j] <= bank_valid1[j];
-            cand_dirty0[j] <= bank_dirty0[j];
-            cand_dirty1[j] <= bank_dirty1[j];
-            cand_lru[j]    <= bank_lru[j];
-          end
-          state <= S_FENCE_READ;
+          // Decode the scan set one cycle before the clear strobes use it, so
+          // the clear strobe does not carry the 64-bit index decode.
+          fence_set_oh <= ONE << fence_set;
+          state        <= S_FENCE_READ;
         end
 
         S_FENCE_READ: begin
-          fe_clr_oh  <= ONE << fence_set;
-          fe_clr_w0  <= (fence_valid0 && fence_dirty0) ||
-                        (!(fence_valid0 && fence_dirty0) && !(fence_valid1 && fence_dirty1));
-          fe_clr_w1  <= !(fence_valid0 && fence_dirty0);
-          fence_line0  <= cand_line0[d_bank];
-          fence_line1  <= cand_line1[d_bank];
-          fence_valid0 <= cand_valid0[d_bank];
-          fence_valid1 <= cand_valid1[d_bank];
-          fence_dirty0 <= cand_dirty0[d_bank];
-          fence_dirty1 <= cand_dirty1[d_bank];
-          fence_tag0   <= cand_tag0[d_bank];
-          fence_tag1   <= cand_tag1[d_bank];
+          fe_w0_oh  <= fence_set_oh & {NUM_SETS{fe_do0}};
+          fe_w1_oh  <= fence_set_oh & {NUM_SETS{fe_do1}};
+          fence_line0  <= sel_line0;
+          fence_line1  <= sel_line1;
+          fence_valid0 <= sel_valid0w;
+          fence_valid1 <= sel_valid1w;
+          fence_dirty0 <= sel_dirty0w;
+          fence_dirty1 <= sel_dirty1w;
+          fence_tag0   <= sel_tag0w;
+          fence_tag1   <= sel_tag1w;
           state        <= S_FENCE_CHECK;
         end
 

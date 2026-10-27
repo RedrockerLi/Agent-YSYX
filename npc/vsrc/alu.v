@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 
-// Two-cycle ALU.  The start cycle registers the forwarded operands; the next
-// cycle computes the add (8-bit carry-select groups), the shift (4:1 stages)
-// and the branch compare from those flops, then selects the result with a
-// registered one-hot op.
+// Three-stage ALU.  The start cycle registers the forwarded operands; S_HIGH
+// computes the four 8-bit group sums (with and without a carry-in), the shift
+// (4:1 stages) and the branch compare; S_SEL resolves the carry chain and
+// selects the result with a registered one-hot op.
 module alu (
   input             clock,
   input             reset,
@@ -43,8 +43,13 @@ module alu (
   reg [31:0] op_oh;
   reg [31:0] a_r, b_r;
   reg [31:0] b_sum_r;
-  reg [31:0] add_r, sh_r;
-  reg        add_cout_r;
+  // The 32-bit add is split across S_HIGH and S_SEL: S_HIGH produces the four
+  // 8-bit group sums (with and without a carry-in), S_SEL resolves the carry
+  // chain and selects the groups.  Keeping the 8-bit adders parallel to each
+  // other holds the S_HIGH path at one adder delay.
+  reg [8:0]  g0_r, g1_r, g2_r, g3_r;
+  reg [8:0]  g1p_r, g2p_r, g3p_r;
+  reg [31:0] sh_r;
   reg        done_r;
 
   assign done = done_r;
@@ -145,23 +150,31 @@ module alu (
   wire op_sub   = (alu_op == ALU_SUB) || (alu_op == ALU_SLT) || (alu_op == ALU_SLTU);
   wire op_sub_r = op_oh[ALU_SUB] | op_oh[ALU_SLT] | op_oh[ALU_SLTU];
 
-  wire [31:0] add_res;
-  wire        add_cout;
-  add32cs u_add (
-    .a   (a_r),
-    .b   (b_sum_r),
-    .cin (op_sub_r),
-    .sum (add_res),
-    .cout(add_cout)
-  );
+  wire [8:0] g0  = {1'b0, a_r[7:0]}   + {1'b0, b_sum_r[7:0]}   + {8'b0, op_sub_r};
+  wire [8:0] g1  = {1'b0, a_r[15:8]}  + {1'b0, b_sum_r[15:8]};
+  wire [8:0] g2  = {1'b0, a_r[23:16]} + {1'b0, b_sum_r[23:16]};
+  wire [8:0] g3  = {1'b0, a_r[31:24]} + {1'b0, b_sum_r[31:24]};
+  wire [8:0] g1p = {1'b0, a_r[15:8]}  + {1'b0, b_sum_r[15:8]}  + 9'd1;
+  wire [8:0] g2p = {1'b0, a_r[23:16]} + {1'b0, b_sum_r[23:16]} + 9'd1;
+  wire [8:0] g3p = {1'b0, a_r[31:24]} + {1'b0, b_sum_r[31:24]} + 9'd1;
 
-  wire [31:0] slt_val  = {31'b0, (a_r[31] != b_r[31]) ? a_r[31] : add_r[31]};
-  wire [31:0] sltu_val = {31'b0, ~add_cout_r};
+  wire c2 = g0_r[8] ? g1p_r[8] : g1_r[8];
+  wire c3 = c2      ? g2p_r[8] : g2_r[8];
+
+  wire [31:0] add_sum =
+      {c3 ? g3p_r[7:0] : g3_r[7:0],
+       c2 ? g2p_r[7:0] : g2_r[7:0],
+       g0_r[8] ? g1p_r[7:0] : g1_r[7:0],
+       g0_r[7:0]};
+  wire add_cout = c3 ? g3p_r[8] : g3_r[8];
+
+  wire [31:0] slt_val  = {31'b0, (a_r[31] != b_r[31]) ? a_r[31] : add_sum[31]};
+  wire [31:0] sltu_val = {31'b0, ~add_cout};
 
   wire sel_add   = op_oh[ALU_ADD] | op_oh[ALU_SUB];
   wire sel_shift = op_oh[ALU_SLL] | op_oh[ALU_SRL] | op_oh[ALU_SRA];
 
-  wire [31:0] res_w = ({32{sel_add}}          & add_r)     |
+  wire [31:0] res_w = ({32{sel_add}}          & add_sum)   |
                       ({32{sel_shift}}        & sh_r)      |
                       ({32{op_oh[ALU_SLT]}}   & slt_val)   |
                       ({32{op_oh[ALU_SLTU]}}  & sltu_val)  |
@@ -192,9 +205,14 @@ module alu (
       a_r      <= 32'b0;
       b_r      <= 32'b0;
       b_sum_r  <= 32'b0;
-      add_r    <= 32'b0;
+      g0_r     <= 9'b0;
+      g1_r     <= 9'b0;
+      g2_r     <= 9'b0;
+      g3_r     <= 9'b0;
+      g1p_r    <= 9'b0;
+      g2p_r    <= 9'b0;
+      g3p_r    <= 9'b0;
       sh_r     <= 32'b0;
-      add_cout_r <= 1'b0;
     end else begin
       case (state)
         S_IDLE: begin
@@ -212,11 +230,16 @@ module alu (
         end
 
         S_HIGH: begin
-          add_r      <= add_res;
-          add_cout_r <= add_cout;
-          sh_r       <= sh_val;
-          cmp_out    <= cmp_w;
-          state      <= S_SEL;
+          g0_r  <= g0;
+          g1_r  <= g1;
+          g2_r  <= g2;
+          g3_r  <= g3;
+          g1p_r <= g1p;
+          g2p_r <= g2p;
+          g3p_r <= g3p;
+          sh_r  <= sh_val;
+          cmp_out <= cmp_w;
+          state <= S_SEL;
         end
 
         S_SEL: begin

@@ -58,16 +58,16 @@ module div_unit #(
 
   assign done = done_r;
 
-  // 32-bit two's-complement negate as two parallel 16-bit halves with a
-  // carry select, so the add is one short level instead of a 32-bit chain.
-  wire [15:0] a_neg_lo, a_neg_hi_1, b_neg_lo, b_neg_hi_1;
-  wire        a_neg_c, b_neg_c;
-  add16cs u_a_neg_lo (.a(~a_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(a_neg_lo), .cout(a_neg_c));
-  add16cs u_a_neg_hi (.a(~a_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(a_neg_hi_1), .cout());
-  add16cs u_b_neg_lo (.a(~b_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(b_neg_lo), .cout(b_neg_c));
-  add16cs u_b_neg_hi (.a(~b_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(b_neg_hi_1), .cout());
-  wire [31:0] a_mag_neg = {a_neg_c ? a_neg_hi_1 : ~a_raw[31:16], a_neg_lo};
-  wire [31:0] b_mag_neg = {b_neg_c ? b_neg_hi_1 : ~b_raw[31:16], b_neg_lo};
+  // 32-bit two's-complement negate as two parallel 16-bit halves.  The high
+  // half is selected by the low half's zero detect, not by a carry chain.
+  wire [15:0] a_neg_lo = ~a_raw[15:0] + 16'd1;
+  wire [15:0] a_neg_hi = ~a_raw[31:16] + 16'd1;
+  wire [15:0] b_neg_lo = ~b_raw[15:0] + 16'd1;
+  wire [15:0] b_neg_hi = ~b_raw[31:16] + 16'd1;
+  wire        a_lo_zero = ~|a_raw[15:0];
+  wire        b_lo_zero = ~|b_raw[15:0];
+  wire [31:0] a_mag_neg = {a_lo_zero ? a_neg_hi : ~a_raw[31:16], a_neg_lo};
+  wire [31:0] b_mag_neg = {b_lo_zero ? b_neg_hi : ~b_raw[31:16], b_neg_lo};
 
   wire [31:0] a_mag_c = (is_signed_r && sign1_r) ? a_neg_r : a_raw;
   wire [31:0] b_mag_c = (is_signed_r && sign2_r) ? b_neg_r : b_raw;
@@ -128,14 +128,14 @@ module div_unit #(
   wire q_sign = is_signed_r && (sign1_r ^ sign2_r);
   wire r_sign = is_signed_r && sign1_r;
 
-  wire [15:0] q_neg_lo, q_neg_hi_1, r_neg_lo, r_neg_hi_1;
-  wire        q_neg_c, r_neg_c;
-  add16cs u_q_neg_lo (.a(~quot[15:0]), .b(16'd0), .cin(1'b1), .sum(q_neg_lo), .cout(q_neg_c));
-  add16cs u_q_neg_hi (.a(~quot[31:16]), .b(16'd0), .cin(1'b1), .sum(q_neg_hi_1), .cout());
-  add16cs u_r_neg_lo (.a(~rem[15:0]), .b(16'd0), .cin(1'b1), .sum(r_neg_lo), .cout(r_neg_c));
-  add16cs u_r_neg_hi (.a(~rem[31:16]), .b(16'd0), .cin(1'b1), .sum(r_neg_hi_1), .cout());
-  wire [31:0] q_neg = {q_neg_c ? q_neg_hi_1 : ~quot[31:16], q_neg_lo};
-  wire [31:0] r_neg = {r_neg_c ? r_neg_hi_1 : ~rem[31:16], r_neg_lo};
+  wire [15:0] q_neg_lo = ~quot[15:0] + 16'd1;
+  wire [15:0] q_neg_hi = ~quot[31:16] + 16'd1;
+  wire [15:0] r_neg_lo = ~rem[15:0] + 16'd1;
+  wire [15:0] r_neg_hi = ~rem[31:16] + 16'd1;
+  wire        q_lo_zero = ~|quot[15:0];
+  wire        r_lo_zero = ~|rem[15:0];
+  wire [31:0] q_neg = {q_lo_zero ? q_neg_hi : ~quot[31:16], q_neg_lo};
+  wire [31:0] r_neg = {r_lo_zero ? r_neg_hi : ~rem[31:16], r_neg_lo};
 
   wire [31:0] q_final = q_sign ? q_neg_r : quot;
   wire [31:0] r_final = r_sign ? r_neg_r : rem[31:0];

@@ -105,16 +105,18 @@ module mul_unit #(
   wire [31:0] p_lo = prod_u[31:0];
   wire [31:0] p_hi = prod_u[63:32];
 
-  wire [15:0] nl_lo, nl_hi_1, nh_lo, nh_hi_1;
-  wire        nl_c, nh_c;
-  add16cs u_nl_lo (.a(~p_lo[15:0]), .b(16'd0), .cin(1'b1), .sum(nl_lo), .cout(nl_c));
-  add16cs u_nl_hi (.a(~p_lo[31:16]), .b(16'd0), .cin(nl_c), .sum(nl_hi_1), .cout());
-  assign neg_lo_sum  = {nl_hi_1, nl_lo};
+  // Each 16-bit half is incremented independently and the high half is
+  // selected by the low half's carry, which is a zero-detect rather than the
+  // carry chain of a 16-bit adder.
+  wire [15:0] nl_lo  = ~p_lo[15:0] + 16'd1;
+  wire [15:0] nl_hi  = ~p_lo[31:16] + 16'd1;
+  wire        lo_zero = ~|p_lo[15:0];
+  assign neg_lo_sum  = {lo_zero ? nl_hi : ~p_lo[31:16], nl_lo};
   assign neg_lo_cout = ~|p_lo;
 
-  add16cs u_nh_lo (.a(~p_hi[15:0]), .b(16'd0), .cin(neg_cout_r), .sum(nh_lo), .cout(nh_c));
-  add16cs u_nh_hi (.a(~p_hi[31:16]), .b(16'd0), .cin(nh_c), .sum(nh_hi_1), .cout());
-  assign neg_hi_sum  = {nh_hi_1, nh_lo};
+  wire [15:0] nh_lo = ~p_hi[15:0] + {15'b0, neg_cout_r};
+  wire        nh_c  = neg_cout_r && ~|p_hi[15:0];
+  assign neg_hi_sum = {nh_c ? (~p_hi[31:16] + 16'd1) : ~p_hi[31:16], nh_lo};
 
   assign done = done_r;
 
@@ -122,14 +124,16 @@ module mul_unit #(
   // forwarding mux and the 32-bit negate/add are not in the start-cycle path.
   wire a_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH) || (op_r == OP_MULHSU);
   wire b_signed_r = (op_r == OP_MUL) || (op_r == OP_MULH);
-  wire [15:0] a_neg_lo, a_neg_hi_1, b_neg_lo, b_neg_hi_1;
-  wire        a_neg_c, b_neg_c;
-  add16cs u_a_neg_lo (.a(~a_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(a_neg_lo), .cout(a_neg_c));
-  add16cs u_a_neg_hi (.a(~a_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(a_neg_hi_1), .cout());
-  add16cs u_b_neg_lo (.a(~b_raw[15:0]), .b(16'd0), .cin(1'b1), .sum(b_neg_lo), .cout(b_neg_c));
-  add16cs u_b_neg_hi (.a(~b_raw[31:16]), .b(16'd0), .cin(1'b1), .sum(b_neg_hi_1), .cout());
-  wire [31:0] a_neg_sum = {a_neg_c ? a_neg_hi_1 : ~a_raw[31:16], a_neg_lo};
-  wire [31:0] b_neg_sum = {b_neg_c ? b_neg_hi_1 : ~b_raw[31:16], b_neg_lo};
+  // Same carry-select shape as the product negation: the high-half select is
+  // the low half's zero detect, not a 16-bit adder carry chain.
+  wire [15:0] a_neg_lo = ~a_raw[15:0] + 16'd1;
+  wire [15:0] a_neg_hi = ~a_raw[31:16] + 16'd1;
+  wire [15:0] b_neg_lo = ~b_raw[15:0] + 16'd1;
+  wire [15:0] b_neg_hi = ~b_raw[31:16] + 16'd1;
+  wire        a_lo_zero = ~|a_raw[15:0];
+  wire        b_lo_zero = ~|b_raw[15:0];
+  wire [31:0] a_neg_sum = {a_lo_zero ? a_neg_hi : ~a_raw[31:16], a_neg_lo};
+  wire [31:0] b_neg_sum = {b_lo_zero ? b_neg_hi : ~b_raw[31:16], b_neg_lo};
 
   wire [31:0] a_mag_s = (a_signed_r && a_raw[31]) ? a_neg_sum : a_raw;
   wire [31:0] b_mag_s = (b_signed_r && b_raw[31]) ? b_neg_sum : b_raw;
